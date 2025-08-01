@@ -1,0 +1,13 @@
+# Ignore everything
+*
+
+# But keep directories
+!*/
+
+# and .jl files
+!*.jl
+
+# and other files
+!README.md
+!*.toml
+!.gitignore
