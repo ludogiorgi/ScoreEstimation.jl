@@ -11,3 +11,6 @@
 !README.md
 !*.toml
 !.gitignore
+
+# also ignore all text files
+*.txt
