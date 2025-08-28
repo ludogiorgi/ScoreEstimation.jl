@@ -1,426 +1,326 @@
+#############################
+#  preprocessing.jl (KGMM)  #
+#############################
+# Functions only. No `module`/`using`/`export` here.
+#
+# This file implements a kernel GMM estimator over a state-space
+# partition. The public entry point is `KGMM`, which accepts a noise
+# scale σ (scalar or vector) and a data matrix μ, and returns for each σ:
+#   - centers        : per-cluster centroids (E[x | cluster])
+#   - score          : score at centers (under chosen convention)
+#   - divergence     : divergence of the score (same convention)
+#   - score_residual : score reconstructed from (Emu - centers)/σ^2
+#   - counts         : sample counts per cluster (accumulated during EMA)
+#   - Nc             : number of clusters
+#   - partition      : the StateSpacePartition object
+#
+# Estimation outline (for each σ):
+#   1) Build a partition once from an initial noisy draw x0 = μ + σ*z0.
+#   2) Run an exponential moving average (EMA) of per-cluster means
+#      across additional noisy batches until convergence.
+#   3) While running EMA, also accumulate ∑‖z‖² and counts per cluster.
+#   4) From the accumulated statistics, compute score and divergence.
+#
+# Parallelization:
+#   - Threaded labeling (per column)
+#   - Thread-local accumulators and single global reduction
+#   - In-place buffers in hot loops
+#
+# Score conventions:
+#   :half — s = -(1/σ) E[z | x]
+#   :unit — s = 0.5 * (-(1/σ) E[z | x])  (default)
+
+# --------------------------------------------------------------------------
+# Internal utilities
+# --------------------------------------------------------------------------
 
 """
-    parallel_assign_labels(x, state_space_partitions)
+    _draw_noisy!(x, z, μ, σ)
 
-Assign cluster labels to data points using multi-threaded parallelization.
-
-# Arguments
-- `x`: Input data matrix with shape (dimensions, n_points)
-- `state_space_partitions`: StateSpacePartition object with an embedding method
-
-# Returns
-- Vector of integer labels for each data point
-
-# Note
-This function uses all available threads to speed up label assignment for large datasets
-while providing a thread-safe progress bar.
+Draw `z ~ N(0, I)` in-place and set `x = μ + σ*z` in-place. Returns `(x, z)`.
+The sizes of `x`, `z`, and `μ` must match.
 """
-
-function parallel_assign_labels(x, state_space_partitions)
-    n_points = size(x, 2)
-    labels = zeros(Int, n_points)
-    
-    # Create a thread-safe progress meter
-    prog = Progress(n_points, desc="Assigning labels: ", barglyphs=BarGlyphs("[=> ]"))
-    
-    # Use a ReentrantLock for safe progress updates
-    prog_lock = ReentrantLock()
-    
-    # Parallelize the label assignment
-    @inbounds Threads.@threads for i in 1:n_points
-        # Compute embedding for this data point
-        labels[i] = state_space_partitions.embedding(x[:,i])
-        
-        # Safely update progress bar
-        lock(prog_lock) do
-            next!(prog)
-        end
-    end
-    
-    return labels
-end
-
-"""
-    generate_xz(y, sigma)
-
-Generate perturbed data and noise vectors for clustering.
-
-# Arguments
-- `y`: Original data points
-- `sigma`: Noise standard deviation
-
-# Returns
-- Tuple of (perturbed data, noise vectors)
-"""
-function generate_xz(y, sigma)
-    z = randn!(similar(y))  # Generate random noise with same shape as y
-    x = @. y + sigma * z    # Add scaled noise to original data
+@inline function _draw_noisy!(x::AbstractMatrix, z::AbstractMatrix,
+                              μ::AbstractMatrix, σ::Real)
+    @assert size(x) == size(z) == size(μ)
+    randn!(z)
+    @inbounds @. x = μ + σ*z
     return x, z
 end
 
 """
-    calculate_averages(X, z, x, y)
+    _assign_labels!(labels, x, ssp)
 
-Calculate cluster centers and average values for each cluster with parallel processing.
-
-# Arguments
-- `X`: Cluster labels/indices for each point
-- `z`: Noise vectors
-- `x`: Perturbed data points
-- `y`: Original data points
-
-# Returns
-- Tuple of (average noise, average residuals, cluster centers)
+Assign cluster labels to columns of `x` using `ssp.embedding`. The result
+is written into `labels` in-place and also returned.
 """
-function calculate_averages(X, z, x, y)
-    # Get dimensions
-    Ndim, Nz = size(z)
-    Nc = maximum(X)
-    
-    # Initialize arrays to store results
-    averages = zeros(Ndim, Nc)
-    averages_residual = zeros(Ndim, Nc)
-    centers = zeros(Ndim, Nc)
-    
-    # Thread-local storage to avoid race conditions
-    n_threads = Threads.nthreads()
-    local_z_sum = [zeros(Ndim, Nc) for _ in 1:n_threads]
-    local_x_sum = [zeros(Ndim, Nc) for _ in 1:n_threads]
-    local_y_sum = [zeros(Ndim, Nc) for _ in 1:n_threads]
-    local_count = [zeros(Int, Nc) for _ in 1:n_threads]
-    
-    # Create a thread-safe progress meter
-    prog = Progress(Nz, desc="Calculating averages: ", barglyphs=BarGlyphs("[=> ]"))
-    prog_lock = ReentrantLock()
-    
-    # Parallel accumulation of sums
-    @inbounds Threads.@threads for i in 1:Nz
-        tid = Threads.threadid()
-        segment_index = X[i]
-        
-        # Thread-local updates
-        @views local_z_sum[tid][:, segment_index] .+= z[:, i]
-        @views local_x_sum[tid][:, segment_index] .+= x[:, i]
-        @views local_y_sum[tid][:, segment_index] .+= y[:, i]
-        local_count[tid][segment_index] += 1
-        
-        # Update progress safely
-        lock(prog_lock) do
-            next!(prog)
-        end
+@inline function _assign_labels!(labels::AbstractVector{Int},
+                                 x::AbstractMatrix, ssp)
+    @inbounds Threads.@threads for i in eachindex(labels)
+        labels[i] = ssp.embedding(view(x, :, i))
     end
-    
-    # Combine thread-local results
-    z_sum = sum(local_z_sum)
-    x_sum = sum(local_x_sum)
-    y_sum = sum(local_y_sum)
-    count = sum(local_count)
-    
-    # Calculate averages using vectorized operations
-    @inbounds for i in 1:Nc
-        if count[i] > 0
-            # Pre-compute inverse count for faster division
-            inv_count = 1.0 / count[i]
-            # Vectorized multiplication instead of division in a loop
-            @views averages[:, i] .= z_sum[:, i] .* inv_count
-            @views averages_residual[:, i] .= y_sum[:, i] .* inv_count 
-            @views centers[:, i] .= x_sum[:, i] .* inv_count
-        end
-    end
-    
-    return averages, averages_residual, centers
+    return labels
 end
 
 """
-    generate_inputs_targets(diff_times, averages_values, centers_values, Nc_values; normalization=true)
+    _batch_stats(labels, z, x, μ) -> (Ez, Emu, Xc, z2_sums, cnts)
 
-Generate inputs and targets for neural network training with reverse sampling method.
+Compute per-cluster statistics over one batch:
+  Ez       = E[z | cluster]
+  Emu      = E[μ | cluster]
+  Xc       = E[x | cluster]
+  z2_sums  = ∑‖z‖² per cluster (not normalized)
+  cnts     = counts per cluster
 
-# Arguments
-- `diff_times`: Vector of diffusion times
-- `averages_values`: List of average values for each diffusion time
-- `centers_values`: List of cluster centers for each diffusion time
-- `Nc_values`: List of number of clusters for each diffusion time
-- `normalization`: Whether to normalize the targets between 0 and 1
-
-# Returns
-- Tuple containing (inputs, targets) matrices, and optional normalization parameters
+Thread-local accumulators are used, followed by a single global reduction.
 """
-function generate_inputs_targets(diff_times, averages_values, centers_values, Nc_values; normalization=true)
-    inputs = []
-    targets = []
-    
-    if normalization == true  # Normalization of the targets between 0 and 1
-        # Calculate global min and max across all diffusion times
-        M_averages_values = maximum(hcat(averages_values...))
-        m_averages_values = minimum(hcat(averages_values...))
-        
-        @inbounds for (i, t) in enumerate(diff_times)
-            # Normalize current time's averages
-            averages_values_norm = (averages_values[i] .- m_averages_values) ./ (M_averages_values - m_averages_values)
-            
-            # Format inputs with time parameter appended
-            inputs_t = hcat([[centers_values[i][:,j]..., t] for j in 1:Nc_values[i]]...)
-            
-            # Format normalized targets
-            targets_t = hcat([[averages_values_norm[:,j]...] for j in 1:Nc_values[i]]...)
-            
-            push!(inputs, inputs_t)
-            push!(targets, targets_t)
+function _batch_stats(labels::AbstractVector{<:Integer},
+                      z::AbstractMatrix{<:Real},
+                      x::AbstractMatrix{<:Real},
+                      μ::AbstractMatrix{<:Real})
+    d, N = size(z)
+    C = maximum(labels)
+    T = Float64
+
+    nt = Threads.nthreads()
+    l_sum_z  = [zeros(T, d, C) for _ in 1:nt]
+    l_sum_μ  = [zeros(T, d, C) for _ in 1:nt]
+    l_sum_x  = [zeros(T, d, C) for _ in 1:nt]
+    l_sum_z2 = [zeros(T,     C) for _ in 1:nt]
+    l_cnt    = [zeros(Int,    C) for _ in 1:nt]
+
+    @inbounds Threads.@threads for i in 1:N
+        t  = Threads.threadid()
+        c  = labels[i]
+        vzi = view(z, :, i)
+        vxi = view(x, :, i)
+        vμi = view(μ, :, i)
+        vSz = view(l_sum_z[t],  :, c)
+        vSμ = view(l_sum_μ[t],  :, c)
+        vSx = view(l_sum_x[t],  :, c)
+        @inbounds @simd for j in 1:d
+            vSz[j] += vzi[j]
+            vSμ[j] += vμi[j]
+            vSx[j] += vxi[j]
         end
-    else
-        @inbounds for (i, t) in enumerate(diff_times)
-            # Format inputs with time parameter appended
-            inputs_t = hcat([[centers_values[i][:,j]..., t] for j in 1:Nc_values[i]]...)
-            
-            # Format original targets without normalization
-            targets_t = hcat([[averages_values[i][:,j]...] for j in 1:Nc_values[i]]...)
-            
-            push!(inputs, inputs_t)
-            push!(targets, targets_t)   
+        l_sum_z2[t][c] += dot(vzi, vzi)
+        l_cnt[t][c]    += 1
+    end
+
+    sum_z  = zeros(T, d, C)
+    sum_μ  = zeros(T, d, C)
+    sum_x  = zeros(T, d, C)
+    sum_z2 = zeros(T,     C)
+    cnt    = zeros(Int,    C)
+    @inbounds for t in 1:nt
+        sum_z  .+= l_sum_z[t]
+        sum_μ  .+= l_sum_μ[t]
+        sum_x  .+= l_sum_x[t]
+        sum_z2 .+= l_sum_z2[t]
+        cnt    .+= l_cnt[t]
+    end
+
+    Ez  = zeros(T, d, C)
+    Emu = zeros(T, d, C)
+    Xc  = zeros(T, d, C)
+    @inbounds for c in 1:C
+        n = cnt[c]
+        if n > 0
+            invn = inv(float(n))
+            vEz  = view(Ez,  :, c); vEmu = view(Emu, :, c); vXc = view(Xc, :, c)
+            vSz  = view(sum_z,  :, c); vSμ = view(sum_μ,  :, c); vSx = view(sum_x,  :, c)
+            @inbounds @simd for j in 1:d
+                vEz[j]  = vSz[j]  * invn
+                vEmu[j] = vSμ[j]  * invn
+                vXc[j]  = vSx[j]  * invn
+            end
         end
     end
-    
-    # Vertically concatenate all time steps
-    inputs = vcat(inputs'...)
-    targets = vcat(targets'...)
-    
-    if normalization == true
-        return (Matrix(inputs'), Matrix(targets'), M_averages_values, m_averages_values)
-    else
-        return (Matrix(inputs'), Matrix(targets'))
-    end
+
+    return Ez, Emu, Xc, sum_z2, cnt
 end
 
 """
-    generate_inputs_targets(averages_values, centers_values, Nc_values; normalization=true)
+    _ema_partition_means_collect(σ, μ; prob=1e-3, do_print=false, conv_param=1e-2, i_max=150)
 
-Generate inputs and targets for neural network training with Langevin sampling method.
+Compute per-cluster EMA means for a fixed σ and, **during EMA**, accumulate
+`∑‖z‖²` and counts per cluster.
 
-# Arguments
-- `averages_values`: Average values for score estimation
-- `centers_values`: Cluster centers
-- `Nc_values`: Number of clusters
-- `normalization`: Whether to normalize the targets between 0 and 1
-
-# Returns
-- Tuple containing (inputs, targets), and optional normalization parameters
+Returns `(Ez, Emu, Xc, Nc, ssp, Ezz2, counts)` where `Ezz2 = sum_z2 ./ counts`
+(with `NaN` for empty clusters).
 """
-function generate_inputs_targets(averages_values, centers_values, Nc_values; normalization=true)
-    if normalization == true
-        # Calculate global min and max
-        M_averages_values = maximum(averages_values)
-        m_averages_values = minimum(averages_values)
-        
-        # Normalize targets
-        averages_values_norm = (averages_values .- m_averages_values) ./ (M_averages_values - m_averages_values)
-        
-        inputs = reshape(centers_values, :, size(centers_values, 2))
-        targets = reshape(averages_values_norm, :, size(averages_values_norm, 2))
-    else
-        inputs = centers_values
-        targets = averages_values
-    end
-    
-    if normalization == true
-        return (inputs, targets), M_averages_values, m_averages_values
-    else
-        return (inputs, targets)
-    end
-end
+function _ema_partition_means_collect(σ::Float64, μ::AbstractMatrix{<:Real};
+                                      prob::Float64=0.001,
+                                      do_print::Bool=false,
+                                      conv_param::Float64=1e-1,
+                                      i_max::Int=150)
+    # Initial draw x0 = μ + σ*z0
+    x0 = similar(μ, Float64)
+    z0 = similar(μ, Float64)
+    _draw_noisy!(x0, z0, μ, σ)
 
-"""
-    f_tilde_σ(σ::Float64, μ; prob = 0.001, do_print=false, conv_param=1e-1, i_max = 150)
-
-Iteratively estimate score function at σ until convergence.
-
-# Arguments
-- `σ`: Noise standard deviation
-- `μ`: Original data points
-- `prob`: Probability threshold for state space partitioning
-- `do_print`: Whether to print progress
-- `conv_param`: Convergence threshold
-- `i_max`: Maximum number of iterations
-
-# Returns
-- Tuple containing (average noise, average residuals, centers, number of clusters, partition)
-"""
-function f_tilde_σ(σ::Float64, μ; prob = 0.001, do_print=false, conv_param=1e-1, i_max = 150)
-    # Initialize state space partitioning
+    # Partition built once from x0
     method = Tree(false, prob)
-    
-    # Generate initial perturbed data and noise
-    x, z = generate_xz(μ, σ)
-    
-    # Create partition of state space
-    state_space_partitions = StateSpacePartition(x; method = method)
-    Nc = maximum(state_space_partitions.partitions)
-    println("Number of clusters: $Nc")
-    
-    # Get cluster labels for each point
-    labels = parallel_assign_labels(x, state_space_partitions)
-    
-    # Calculate initial averages
-    averages, averages_residual, centers = calculate_averages(labels, z, x, μ)
-    averages_old, averages_residual_old, centers_old = averages, averages_residual, centers
-    
-    # Iterative refinement
-    D_avr_temp = 1.0
+    ssp = StateSpacePartition(x0; method=method)
+    C = maximum(ssp.partitions)
+    do_print && println("Number of clusters: $C")
+
+    # First-batch stats (includes z2 and counts)
+    labels0 = Vector{Int}(undef, size(μ, 2))
+    _assign_labels!(labels0, x0, ssp)
+    Ez, Emu, Xc, z2_sums, cnts = _batch_stats(labels0, z0, x0, μ)
+
+    # Buffers reused across iterations
+    d, N = size(μ)
+    x = similar(μ, Float64)
+    z = similar(μ, Float64)
+    labels = Vector{Int}(undef, N)
+
+    Ez_old, Emu_old, Xc_old = Ez, Emu, Xc
+    Ez_new  = similar(Ez_old)
+    Emu_new = similar(Emu_old)
+    Xc_new  = similar(Xc_old)
+
+    # Accumulators across EMA
+    sum_z2 = copy(z2_sums)
+    counts = copy(cnts)
+
+    Δ = 1.0
     i = 1
-    while D_avr_temp > conv_param && i < i_max
-        # Generate new perturbed data
-        x, z = generate_xz(μ, σ)
-        
-        # Apply partition
-        labels = parallel_assign_labels(x, state_space_partitions)
-        
-        # Calculate new averages
-        averages, averages_residual, centers = calculate_averages(labels, z, x, μ)
-        
-        # Update running averages
-        averages_new = (averages .+ i .* averages_old) ./ (i+1)
-        averages_residual_new = (averages_residual .+ i .* averages_residual_old) ./ (i+1)
-        centers_new = (centers .+ i .* centers_old) ./ (i+1)
-        
-        # Check convergence
-        D_avr_temp = mean(abs2, averages_new .- averages_old) / mean(abs2, averages_new)
-        
-        if do_print==true
-            println("Iteration: $i, Δ: $D_avr_temp")
+    while Δ > conv_param && i < i_max
+        _draw_noisy!(x, z, μ, σ)
+        _assign_labels!(labels, x, ssp)
+        Ez_b, Emu_b, Xc_b, z2_b, cnt_b = _batch_stats(labels, z, x, μ)
+
+        @inbounds @. Ez_new  = (Ez_b  + i * Ez_old)  / (i + 1)
+        @inbounds @. Emu_new = (Emu_b + i * Emu_old) / (i + 1)
+        @inbounds @. Xc_new  = (Xc_b  + i * Xc_old)  / (i + 1)
+
+        # Fold divergence statistics into the EMA loop
+        @inbounds @simd for c in 1:C
+            sum_z2[c] += z2_b[c]
+            counts[c] += cnt_b[c]
         end
-        
-        # Update old values for next iteration
-        averages_old, averages_residual_old, centers_old = averages_new, averages_residual_new, centers_new
+
+        # Δ = mean(abs2, Ez_new - Ez_old) / max(mean(abs2, Ez_new), ϵ)
+        num = 0.0
+        den = 0.0
+        @inbounds @simd for k in eachindex(Ez_new)
+            diff = @fastmath (Ez_new[k] - Ez_old[k])
+            num += diff * diff
+            den += Ez_new[k] * Ez_new[k]
+        end
+        Δ = num / max(den, 1e-300)
+        do_print && println("Iteration: $i, Δ: $Δ")
+
+        Ez_old, Ez_new   = Ez_new, Ez_old
+        Emu_old, Emu_new = Emu_new, Emu_old
+        Xc_old,  Xc_new  = Xc_new,  Xc_old
         i += 1
     end
-    
-    return averages_old, averages_residual_old, centers_old, Nc, state_space_partitions
-end
 
-"""
-    f_tilde(σ_values::Vector{Float64}, diff_times::Vector{Float64}, μ; kwargs...)
-
-Apply f_tilde_σ for multiple noise levels with diffusion times.
-
-# Arguments
-- `σ_values`: Vector of noise standard deviations
-- `diff_times`: Vector of diffusion times (must match length of σ_values)
-- `μ`: Original data points
-- `kwargs`: Additional parameters passed to f_tilde_σ and generate_inputs_targets
-
-# Returns
-- Neural network inputs and targets for training
-"""
-function f_tilde(σ_values::Vector{Float64}, diff_times::Vector{Float64}, μ; 
-                prob = 0.001, do_print=false, conv_param=1e-1, i_max = 150, normalization=true, residual=false)
-    # Initialize storage
-    averages_values = []
-    averages_residual_values = []
-    centers_values = []
-    Nc_values = []
-    
-    # Process each noise level
-    @inbounds for i in eachindex(σ_values)
-        averages, averages_residual, centers, Nc, _ = f_tilde_σ(σ_values[i], μ; 
-                                                           prob=prob, 
-                                                           do_print=do_print, 
-                                                           conv_param=conv_param, 
-                                                           i_max=i_max)
-        push!(averages_values, averages)
-        push!(averages_residual_values, averages_residual)
-        push!(centers_values, centers)
-        push!(Nc_values, Nc)
+    # Build Ezz2 from accumulated sums
+    Ezz2 = zeros(Float64, C)
+    @inbounds for c in 1:C
+        Ezz2[c] = counts[c] > 0 ? sum_z2[c] / counts[c] : NaN
     end
-    
-    # Generate inputs and targets based on residual flag
-    if residual == true
-        return generate_inputs_targets(diff_times, averages_residual_values, centers_values, Nc_values; normalization=normalization)
-    else
-        return generate_inputs_targets(diff_times, averages_values, centers_values, Nc_values; normalization=normalization)
+
+    return Ez_old, Emu_old, Xc_old, C, ssp, Ezz2, counts
+end
+
+"""
+    _score_and_divergence(Ez, Emu, Xc, Ezz2, σ; convention=:unit)
+        -> (score, divergence, score_residual)
+
+Construct score and divergence at cluster centers under the selected
+convention (:unit or :half). Also returns `score_residual = (Emu - Xc)/σ^2`
+scaled consistently.
+"""
+@inline function _score_and_divergence(Ez::AbstractMatrix{<:Real},
+                                       Emu::AbstractMatrix{<:Real},
+                                       Xc::AbstractMatrix{<:Real},
+                                       Ezz2::AbstractVector{<:Real},
+                                       σ::Real; convention::Symbol=:unit)
+    d, C = size(Ez)
+    invσ  = 1 / σ
+    invσ2 = invσ^2
+    β = (convention === :unit) ? 0.5 : 1.0
+
+    # Score from Ez
+    score = Matrix{Float64}(undef, d, C)
+    @inbounds for c in 1:C
+        vS = view(score, :, c)
+        vE = view(Ez,    :, c)
+        @inbounds @simd for j in 1:d
+            vS[j] = -β * invσ * float(vE[j])
+        end
     end
-end
 
-"""
-    f_tilde(σ_value::Float64, μ; kwargs...)
-
-Apply f_tilde_σ for a single noise level.
-
-# Arguments
-- `σ_value`: Noise standard deviation
-- `μ`: Original data points
-- `kwargs`: Additional parameters passed to f_tilde_σ and generate_inputs_targets
-
-# Returns
-- Neural network inputs and targets for training
-"""
-function f_tilde(σ_value::Float64, μ; 
-                prob = 0.001, do_print=false, conv_param=1e-1, i_max = 150, normalization=true, residual=false)
-    # Process single noise level
-    averages, averages_residual, centers, Nc, _ = f_tilde_σ(σ_value, μ; 
-                                                       prob=prob, 
-                                                       do_print=do_print, 
-                                                       conv_param=conv_param, 
-                                                       i_max=i_max)
-    
-    # Generate inputs and targets based on residual flag
-    if residual == true
-        return generate_inputs_targets(averages_residual, centers, Nc; normalization=normalization)
-    else
-        return generate_inputs_targets(averages, centers, Nc; normalization=normalization)
+    # Score reconstructed from (Emu - Xc)/σ^2
+    score_residual = Matrix{Float64}(undef, d, C)
+    @inbounds for c in 1:C
+        vSr = view(score_residual, :, c)
+        vEm = view(Emu,  :, c)
+        vXc = view(Xc,   :, c)
+        @inbounds @simd for j in 1:d
+            vSr[j] = β * (float(vEm[j]) - float(vXc[j])) * invσ2
+        end
     end
+
+    # Divergence (derived for :half; scales linearly with β)
+    divergence = Vector{Float64}(undef, C)
+    @inbounds for c in 1:C
+        sc2_half = (β == 1.0) ? dot(view(score, :, c), view(score, :, c)) :
+                    dot(view(score, :, c), view(score, :, c)) / (β^2)
+        div_half = (float(Ezz2[c]) - d) * invσ2 - sc2_half
+        divergence[c] = β * div_half
+    end
+
+    return score, divergence, score_residual
+end
+
+# --------------------------------------------------------------------------
+# Public API
+# --------------------------------------------------------------------------
+
+"""
+    KGMM(σ::Real, μ; prob=1e-3, conv_param=1e-2, i_max=150,
+         convention=:unit, show_progress=false)
+
+    KGMM(σs::AbstractVector{<:Real}, μ; ...)
+
+Kernel GMM estimator on a state-space partition learned at each σ.
+Divergence statistics are accumulated **during** the EMA loop.
+For each σ, returns a `NamedTuple` with:
+  centers, score, divergence, score_residual, counts, Nc, partition.
+"""
+function KGMM(σ::Real, μ::AbstractMatrix{<:Real};
+              prob::Float64=1e-3,
+              conv_param::Float64=1e-2,
+              i_max::Int=150,
+              convention::Symbol=:unit,
+              show_progress::Bool=false)
+    Ez, Emu, Xc, C, ssp, Ezz2, counts =
+        _ema_partition_means_collect(float(σ), μ;
+                                     prob=prob, do_print=show_progress,
+                                     conv_param=conv_param, i_max=i_max)
+
+    score, divergence, score_residual =
+        _score_and_divergence(Ez, Emu, Xc, Ezz2, σ; convention=convention)
+
+    return (centers=Xc, score=score, divergence=divergence,
+            score_residual=score_residual, counts=counts, Nc=C, partition=ssp)
 end
 
 """
-    f_tilde_ssp(σ_value::Float64, μ; kwargs...)
+    KGMM(σs::AbstractVector{<:Real}, μ; kwargs...) -> Vector{NamedTuple}
 
-Apply f_tilde_σ for a single noise level and return the state space partition.
-
-# Arguments
-- `σ_value`: Noise standard deviation
-- `μ`: Original data points
-- `kwargs`: Additional parameters passed to f_tilde_σ
-
-# Returns
-- Tuple containing (averages, averages_residual, centers, Nc, state_space_partition)
+Vectorized convenience wrapper that applies `KGMM` to each σ in `σs`.
 """
-function f_tilde_ssp(σ_value::Float64, μ; 
-                    prob = 0.001, do_print=false, conv_param=1e-1, i_max = 150, normalization=true)
-    # Process single noise level and return full results including state space partition
-    averages, averages_residual, centers, Nc, ssp = f_tilde_σ(σ_value, μ; 
-                                                         prob=prob, 
-                                                         do_print=do_print, 
-                                                         conv_param=conv_param, 
-                                                         i_max=i_max)
-    return averages, averages_residual, centers, Nc, ssp
-end
-
-"""
-    f_tilde_labels(σ_value::Float64, μ; kwargs...)
-
-Apply f_tilde_σ and return cluster labels along with averages and centers.
-
-# Arguments
-- `σ_value`: Noise standard deviation
-- `μ`: Original data points
-- `kwargs`: Additional parameters passed to f_tilde_σ
-
-# Returns
-- Tuple containing (averages, centers, Nc, labels)
-"""
-function f_tilde_labels(σ_value::Float64, μ; 
-                       prob = 0.001, do_print=false, conv_param=1e-1, i_max = 150, normalization=true)
-    # Process single noise level
-    averages, averages_residual, centers, Nc, ssp = f_tilde_σ(σ_value, μ; 
-                                                         prob=prob, 
-                                                         do_print=do_print, 
-                                                         conv_param=conv_param, 
-                                                         i_max=i_max)
-    
-    # Generate perturbed data for labeling
-    x, _ = generate_xz(μ, σ_value)
-    
-    # Apply partition to get labels
-    labels = [@inbounds ssp.embedding(x[:,i]) for i in 1:size(x)[2]]
-    
-    return averages, centers, Nc, labels
+function KGMM(σs::AbstractVector{<:Real}, μ::AbstractMatrix{<:Real}; kwargs...)
+    out = Vector{NamedTuple}(undef, length(σs))
+    @inbounds for k in eachindex(σs)
+        out[k] = KGMM(float(σs[k]), μ; kwargs...)
+    end
+    return out
 end

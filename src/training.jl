@@ -31,11 +31,11 @@ end
 Generate perturbed data and noise vectors for fixed noise level.
 
 # Arguments
-- `y`: Original data points
+- `y`: Original data points (matrix with shape (n_samples, dim))
 - `σ`: Noise standard deviation (scalar)
 
 # Returns
-- Tuple of (perturbed data, noise vectors)
+- Tuple of (perturbed data, noise vectors) with same shape as input
 """
 function generate_xz(y, σ)
     z = randn!(similar(y))
