@@ -83,7 +83,7 @@ function _batch_stats(labels::AbstractVector{<:Integer},
 
     nt = Threads.nthreads()
     l_sum_z  = [zeros(T, d, C) for _ in 1:nt]
-    l_sum_μ  = [zeros(T, d, C) for _ in 1:nt]
+    # l_sum_μ  = [zeros(T, d, C) for _ in 1:nt]   # (commented out: average μ)
     l_sum_x  = [zeros(T, d, C) for _ in 1:nt]
     l_sum_z2 = [zeros(T,     C) for _ in 1:nt]
     l_cnt    = [zeros(Int,    C) for _ in 1:nt]
@@ -93,13 +93,13 @@ function _batch_stats(labels::AbstractVector{<:Integer},
         c  = labels[i]
         vzi = view(z, :, i)
         vxi = view(x, :, i)
-        vμi = view(μ, :, i)
+        # vμi = view(μ, :, i)                      # (commented)
         vSz = view(l_sum_z[t],  :, c)
-        vSμ = view(l_sum_μ[t],  :, c)
+        # vSμ = view(l_sum_μ[t],  :, c)            # (commented)
         vSx = view(l_sum_x[t],  :, c)
         @inbounds @simd for j in 1:d
             vSz[j] += vzi[j]
-            vSμ[j] += vμi[j]
+            # vSμ[j] += vμi[j]                     # (commented)
             vSx[j] += vxi[j]
         end
         l_sum_z2[t][c] += dot(vzi, vzi)
@@ -107,36 +107,37 @@ function _batch_stats(labels::AbstractVector{<:Integer},
     end
 
     sum_z  = zeros(T, d, C)
-    sum_μ  = zeros(T, d, C)
+    # sum_μ  = zeros(T, d, C)                      # (commented)
     sum_x  = zeros(T, d, C)
     sum_z2 = zeros(T,     C)
     cnt    = zeros(Int,    C)
     @inbounds for t in 1:nt
         sum_z  .+= l_sum_z[t]
-        sum_μ  .+= l_sum_μ[t]
+        # sum_μ  .+= l_sum_μ[t]                    # (commented)
         sum_x  .+= l_sum_x[t]
         sum_z2 .+= l_sum_z2[t]
         cnt    .+= l_cnt[t]
     end
 
     Ez  = zeros(T, d, C)
-    Emu = zeros(T, d, C)
+    # Emu = zeros(T, d, C)                         # (commented)
     Xc  = zeros(T, d, C)
     @inbounds for c in 1:C
         n = cnt[c]
         if n > 0
             invn = inv(float(n))
-            vEz  = view(Ez,  :, c); vEmu = view(Emu, :, c); vXc = view(Xc, :, c)
-            vSz  = view(sum_z,  :, c); vSμ = view(sum_μ,  :, c); vSx = view(sum_x,  :, c)
+            vEz  = view(Ez,  :, c); vXc = view(Xc, :, c)
+            vSz  = view(sum_z,  :, c); # vSμ = view(sum_μ,  :, c)   # (commented)
+            vSx = view(sum_x,  :, c)
             @inbounds @simd for j in 1:d
                 vEz[j]  = vSz[j]  * invn
-                vEmu[j] = vSμ[j]  * invn
+                # vEmu[j] = vSμ[j]  * invn           # (commented)
                 vXc[j]  = vSx[j]  * invn
             end
         end
     end
 
-    return Ez, Emu, Xc, sum_z2, cnt
+    return Ez, Xc, sum_z2, cnt
 end
 
 """
@@ -167,7 +168,7 @@ function _ema_partition_means_collect(σ::Float64, μ::AbstractMatrix{<:Real};
     # First-batch stats (includes z2 and counts)
     labels0 = Vector{Int}(undef, size(μ, 2))
     _assign_labels!(labels0, x0, ssp)
-    Ez, Emu, Xc, z2_sums, cnts = _batch_stats(labels0, z0, x0, μ)
+    Ez, Xc, z2_sums, cnts = _batch_stats(labels0, z0, x0, μ)
 
     # Buffers reused across iterations
     d, N = size(μ)
@@ -175,9 +176,8 @@ function _ema_partition_means_collect(σ::Float64, μ::AbstractMatrix{<:Real};
     z = similar(μ, Float64)
     labels = Vector{Int}(undef, N)
 
-    Ez_old, Emu_old, Xc_old = Ez, Emu, Xc
+    Ez_old, Xc_old = Ez, Xc
     Ez_new  = similar(Ez_old)
-    Emu_new = similar(Emu_old)
     Xc_new  = similar(Xc_old)
 
     # Accumulators across EMA
@@ -189,10 +189,10 @@ function _ema_partition_means_collect(σ::Float64, μ::AbstractMatrix{<:Real};
     while Δ > conv_param && i < i_max
         _draw_noisy!(x, z, μ, σ)
         _assign_labels!(labels, x, ssp)
-        Ez_b, Emu_b, Xc_b, z2_b, cnt_b = _batch_stats(labels, z, x, μ)
+        Ez_b, Xc_b, z2_b, cnt_b = _batch_stats(labels, z, x, μ)
 
         @inbounds @. Ez_new  = (Ez_b  + i * Ez_old)  / (i + 1)
-        @inbounds @. Emu_new = (Emu_b + i * Emu_old) / (i + 1)
+        # @inbounds @. Emu_new = (Emu_b + i * Emu_old) / (i + 1)   # (commented)
         @inbounds @. Xc_new  = (Xc_b  + i * Xc_old)  / (i + 1)
 
         # Fold divergence statistics into the EMA loop
@@ -213,7 +213,7 @@ function _ema_partition_means_collect(σ::Float64, μ::AbstractMatrix{<:Real};
         do_print && println("Iteration: $i, Δ: $Δ")
 
         Ez_old, Ez_new   = Ez_new, Ez_old
-        Emu_old, Emu_new = Emu_new, Emu_old
+        # Emu_old, Emu_new = Emu_new, Emu_old                         # (commented)
         Xc_old,  Xc_new  = Xc_new,  Xc_old
         i += 1
     end
@@ -224,11 +224,11 @@ function _ema_partition_means_collect(σ::Float64, μ::AbstractMatrix{<:Real};
         Ezz2[c] = counts[c] > 0 ? sum_z2[c] / counts[c] : NaN
     end
 
-    return Ez_old, Emu_old, Xc_old, C, ssp, Ezz2, counts
+    return Ez_old, Xc_old, C, ssp, Ezz2, counts
 end
 
 """
-    _score_and_divergence(Ez, Emu, Xc, Ezz2, σ) -> (score, divergence)
+    _score_and_divergence(Ez, Xc, Ezz2, σ) -> (score, divergence)
 
 Standard identities:
 - s(x) = -(1/σ) E[z|x]
@@ -237,7 +237,6 @@ Standard identities:
 Note: evaluation of `score_residual = (Emu - Xc)/σ^2` is disabled.
 """
 @inline function _score_and_divergence(Ez::AbstractMatrix{<:Real},
-                                       Emu::AbstractMatrix{<:Real},
                                        Xc::AbstractMatrix{<:Real},
                                        Ezz2::AbstractVector{<:Real},
                                        σ::Real)
@@ -296,12 +295,12 @@ function KGMM(σ::Real, μ::AbstractMatrix{<:Real};
               conv_param::Float64=1e-2,
               i_max::Int=150,
               show_progress::Bool=false)
-    Ez, Emu, Xc, C, ssp, Ezz2, counts =
+    Ez, Xc, C, ssp, Ezz2, counts =
         _ema_partition_means_collect(float(σ), μ;
                                      prob=prob, do_print=show_progress,
                                      conv_param=conv_param, i_max=i_max)
 
-    score, divergence = _score_and_divergence(Ez, Emu, Xc, Ezz2, σ)
+    score, divergence = _score_and_divergence(Ez, Xc, Ezz2, σ)
 
     return (centers=Xc, score=score, divergence=divergence,
             score_residual=nothing, counts=counts, Nc=C, partition=ssp)
