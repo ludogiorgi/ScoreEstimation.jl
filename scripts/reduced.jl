@@ -50,17 +50,19 @@ obs_uncorr = obs[:, :]
 
 # ---------------- Ground-truth (steady-state convention) ----------------
 
-# Score: s(x) = (F_tilde + a x + b x^2 - c x^3) / s^2
+# Score for 1D stationary SDE dX = f(X) dt + s dW:
+# s(x) = ∂x log p(x) = 2 f(x) / s^2 (zero-flux stationary solution)
 function score_true(x, p=params)
     u = x[1]
-    return [(p.F_tilde + p.a*u + p.b*u^2 - p.c*u^3) / (p.s^2)]
+    f = p.F_tilde + p.a*u + p.b*u^2 - p.c*u^3
+    return [2 * f / (p.s^2)]
 end
 
-# Divergence in 1D is d/dx of the score:
-# div s(x) = (a + 2 b x - 3 c x^2) / s^2
+# Divergence in 1D is derivative of the score: s'(x) = 2 f'(x) / s^2
 function divergence_true(x, p=params)
     u = x[1]
-    return [(p.a + 2*p.b*u - 3*p.c*u^2) / (p.s^2)]
+    fp = p.a + 2*p.b*u - 3*p.c*u^2
+    return [2 * fp / (p.s^2)]
 end
 
 # Normalization helpers (map normalized coordinate ξ to physical x = ξ*S + M)
@@ -89,7 +91,7 @@ neurons = [size(obs_uncorr,1), 100, 50, size(obs_uncorr,1)]  # D -> 100 -> 50 ->
     obs_uncorr;
     preprocessing = true,           # use KGMM preprocessing
     σ             = σ_value,
-    kgmm_kwargs   = (prob=0.002, conv_param=1e-4, show_progress=false, convention=:unit),
+    kgmm_kwargs   = (prob=0.002, conv_param=1e-4, show_progress=false),
     n_epochs      = 2000,
     batch_size    = 16,
     lr            = 1e-3,
@@ -97,11 +99,11 @@ neurons = [size(obs_uncorr,1), 100, 50, size(obs_uncorr,1)]  # D -> 100 -> 50 ->
     divergence    = true,
     probes        = 1,
     use_gpu       = false,
-    verbose       = false,
+    verbose       = true,
 )
 
-# score from ε-net: for :unit convention, sθ(x) = -ε̂(x)/(2σ)
-sθ = X -> -Array(nn(Float32.(X))) ./ (2f0 * Float32(σ_value))
+# score from ε-net: sθ(x) = -ε̂(x)/σ
+sθ = X -> -Array(nn(Float32.(X))) ./ Float32(σ_value)
 
 # Use KGMM output returned by the training wrapper
 centers = res_wrapped.centers
@@ -165,3 +167,48 @@ rmse_d_nn_kg     = rmse(div_nn_v,   div_kgmm_v)
 
 @info "RMSE (score):  NN vs True = $(rmse_s_nn_true),  KGMM vs True = $(rmse_s_kg_true),  NN vs KGMM = $(rmse_s_nn_kg)"
 @info "RMSE (divergence):  NN vs True = $(rmse_d_nn_true),  KGMM vs True = $(rmse_d_kg_true),  NN vs KGMM = $(rmse_d_nn_kg)"
+
+##
+##############################
+#  Compare: NN vs NN+KGMM    #
+##############################
+
+# Train a second network WITHOUT preprocessing (raw DSM), keeping same σ and architecture
+@time nn_raw, train_losses_raw, _, div_fn_raw, _ = ScoreEstimation.train(
+    obs_uncorr;
+    preprocessing = false,
+    σ             = σ_value,
+    n_epochs      = 20,
+    batch_size    = 16,
+    lr            = 1e-3,
+    neurons       = neurons,
+    divergence    = true,
+    probes        = 1,
+    use_gpu       = false,
+    verbose       = true,
+)
+
+# Score from raw ε-net: sθ(x) = -ε̂(x)/σ
+sθ_raw = X -> -Array(nn_raw(Float32.(X))) ./ Float32(σ_value)
+
+# Evaluate both NN variants at KGMM centers
+Yscore_hat_raw = sθ_raw(centers)
+Ydiv_hat_raw   = div_fn_raw(centers)
+
+score_nn_raw_sorted = vec(Yscore_hat_raw)[centers_sorted_indices]
+div_nn_raw_sorted   = vec(Ydiv_hat_raw)[centers_sorted_indices]
+
+# Figures: analytic vs NN+KGMM vs NN (raw DSM)
+plt1c = Plots.plot(centers_sorted, scores_true; color=:red, lw=2, label="Analytic score",
+                   xlabel="x (normalized)", ylabel="score", title="Score: Analytic vs NN + KGMM vs NN")
+Plots.plot!(plt1c, centers_sorted, score_nn_sorted; color=:blue, lw=2, label="NN + KGMM")
+Plots.plot!(plt1c, centers_sorted, score_nn_raw_sorted; color=:purple, lw=2, label="NN (DSM)")
+
+plt2c = Plots.plot(centers_sorted, divs_true; color=:red, lw=2, label="Analytic divergence",
+                   xlabel="x (normalized)", ylabel="divergence", title="Divergence: Analytic vs NN + KGMM vs NN")
+Plots.plot!(plt2c, centers_sorted, div_nn_sorted; color=:blue, lw=2, label="NN + KGMM")
+Plots.plot!(plt2c, centers_sorted, div_nn_raw_sorted; color=:purple, lw=2, label="NN (DSM)")
+
+finalfig2 = Plots.plot(plt1c, plt2c; layout=(2, 1), size=(900, 900), legend=:topright)
+display(finalfig2)
+savefig(finalfig2, "figures/nn_compare.png")

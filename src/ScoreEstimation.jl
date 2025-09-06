@@ -8,6 +8,7 @@ using Random
 using Base.Threads
 using Statistics
 using Flux
+using ProgressMeter
 
 
 include("preprocessing.jl")

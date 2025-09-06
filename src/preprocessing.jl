@@ -7,7 +7,7 @@
 # partition. The public entry point is `KGMM`, which accepts a noise
 # scale σ (scalar or vector) and a data matrix μ, and returns for each σ:
 #   - centers        : per-cluster centroids (E[x | cluster])
-#   - score          : score at centers (under chosen convention)
+#   - score          : score at centers (standard: s = -(1/σ) E[z|x])
 #   - divergence     : divergence of the score (same convention)
 #   # (disabled) score_residual : score reconstructed from (Emu - centers)/σ^2
 #   - counts         : sample counts per cluster (accumulated during EMA)
@@ -26,9 +26,8 @@
 #   - Thread-local accumulators and single global reduction
 #   - In-place buffers in hot loops
 #
-# Score conventions:
-#   :half — s = -(1/σ) E[z | x]
-#   :unit — s = 0.5 * (-(1/σ) E[z | x])  (default)
+# Score convention (standard Gaussian smoothing with std σ):
+#   s(x) = -(1/σ) E[z | x]
 
 # --------------------------------------------------------------------------
 # Internal utilities
@@ -229,24 +228,22 @@ function _ema_partition_means_collect(σ::Float64, μ::AbstractMatrix{<:Real};
 end
 
 """
-    _score_and_divergence(Ez, Emu, Xc, Ezz2, σ; convention=:unit)
-        -> (score, divergence)
+    _score_and_divergence(Ez, Emu, Xc, Ezz2, σ) -> (score, divergence)
 
-Construct score and divergence at cluster centers under the selected
-convention (:unit or :half).
+Standard identities:
+- s(x) = -(1/σ) E[z|x]
+- ∇·s(x) = ((E[‖z‖²|x] - d)/σ²) - ‖s(x)‖²
 
-Note: evaluation of the alternative `score_residual = (Emu - Xc)/σ^2`
-has been disabled per user request.
+Note: evaluation of `score_residual = (Emu - Xc)/σ^2` is disabled.
 """
 @inline function _score_and_divergence(Ez::AbstractMatrix{<:Real},
                                        Emu::AbstractMatrix{<:Real},
                                        Xc::AbstractMatrix{<:Real},
                                        Ezz2::AbstractVector{<:Real},
-                                       σ::Real; convention::Symbol=:unit)
+                                       σ::Real)
     d, C = size(Ez)
     invσ  = 1 / σ
     invσ2 = invσ^2
-    β = (convention === :unit) ? 0.5 : 1.0
 
     # Score from Ez
     score = Matrix{Float64}(undef, d, C)
@@ -254,7 +251,7 @@ has been disabled per user request.
         vS = view(score, :, c)
         vE = view(Ez,    :, c)
         @inbounds @simd for j in 1:d
-            vS[j] = -β * invσ * float(vE[j])
+            vS[j] = -invσ * float(vE[j])
         end
     end
 
@@ -269,13 +266,11 @@ has been disabled per user request.
     #     end
     # end
 
-    # Divergence (derived for :half; scales linearly with β)
+    # Divergence (standard identity)
     divergence = Vector{Float64}(undef, C)
     @inbounds for c in 1:C
-        sc2_half = (β == 1.0) ? dot(view(score, :, c), view(score, :, c)) :
-                    dot(view(score, :, c), view(score, :, c)) / (β^2)
-        div_half = (float(Ezz2[c]) - d) * invσ2 - sc2_half
-        divergence[c] = β * div_half
+        sc2 = dot(view(score, :, c), view(score, :, c))
+        divergence[c] = (float(Ezz2[c]) - d) * invσ2 - sc2
     end
 
     return score, divergence
@@ -287,7 +282,7 @@ end
 
 """
     KGMM(σ::Real, μ; prob=1e-3, conv_param=1e-2, i_max=150,
-         convention=:unit, show_progress=false)
+         show_progress=false)
 
     KGMM(σs::AbstractVector{<:Real}, μ; ...)
 
@@ -300,15 +295,13 @@ function KGMM(σ::Real, μ::AbstractMatrix{<:Real};
               prob::Float64=1e-3,
               conv_param::Float64=1e-2,
               i_max::Int=150,
-              convention::Symbol=:unit,
               show_progress::Bool=false)
     Ez, Emu, Xc, C, ssp, Ezz2, counts =
         _ema_partition_means_collect(float(σ), μ;
                                      prob=prob, do_print=show_progress,
                                      conv_param=conv_param, i_max=i_max)
 
-    score, divergence =
-        _score_and_divergence(Ez, Emu, Xc, Ezz2, σ; convention=convention)
+    score, divergence = _score_and_divergence(Ez, Emu, Xc, Ezz2, σ)
 
     return (centers=Xc, score=score, divergence=divergence,
             score_residual=nothing, counts=counts, Nc=C, partition=ssp)
