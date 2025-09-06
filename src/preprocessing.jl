@@ -9,7 +9,7 @@
 #   - centers        : per-cluster centroids (E[x | cluster])
 #   - score          : score at centers (under chosen convention)
 #   - divergence     : divergence of the score (same convention)
-#   - score_residual : score reconstructed from (Emu - centers)/σ^2
+#   # (disabled) score_residual : score reconstructed from (Emu - centers)/σ^2
 #   - counts         : sample counts per cluster (accumulated during EMA)
 #   - Nc             : number of clusters
 #   - partition      : the StateSpacePartition object
@@ -230,11 +230,13 @@ end
 
 """
     _score_and_divergence(Ez, Emu, Xc, Ezz2, σ; convention=:unit)
-        -> (score, divergence, score_residual)
+        -> (score, divergence)
 
 Construct score and divergence at cluster centers under the selected
-convention (:unit or :half). Also returns `score_residual = (Emu - Xc)/σ^2`
-scaled consistently.
+convention (:unit or :half).
+
+Note: evaluation of the alternative `score_residual = (Emu - Xc)/σ^2`
+has been disabled per user request.
 """
 @inline function _score_and_divergence(Ez::AbstractMatrix{<:Real},
                                        Emu::AbstractMatrix{<:Real},
@@ -256,16 +258,16 @@ scaled consistently.
         end
     end
 
-    # Score reconstructed from (Emu - Xc)/σ^2
-    score_residual = Matrix{Float64}(undef, d, C)
-    @inbounds for c in 1:C
-        vSr = view(score_residual, :, c)
-        vEm = view(Emu,  :, c)
-        vXc = view(Xc,   :, c)
-        @inbounds @simd for j in 1:d
-            vSr[j] = β * (float(vEm[j]) - float(vXc[j])) * invσ2
-        end
-    end
+    # Score reconstructed from (Emu - Xc)/σ^2 (disabled)
+    # score_residual = Matrix{Float64}(undef, d, C)
+    # @inbounds for c in 1:C
+    #     vSr = view(score_residual, :, c)
+    #     vEm = view(Emu,  :, c)
+    #     vXc = view(Xc,   :, c)
+    #     @inbounds @simd for j in 1:d
+    #         vSr[j] = β * (float(vEm[j]) - float(vXc[j])) * invσ2
+    #     end
+    # end
 
     # Divergence (derived for :half; scales linearly with β)
     divergence = Vector{Float64}(undef, C)
@@ -276,7 +278,7 @@ scaled consistently.
         divergence[c] = β * div_half
     end
 
-    return score, divergence, score_residual
+    return score, divergence
 end
 
 # --------------------------------------------------------------------------
@@ -292,7 +294,7 @@ end
 Kernel GMM estimator on a state-space partition learned at each σ.
 Divergence statistics are accumulated **during** the EMA loop.
 For each σ, returns a `NamedTuple` with:
-  centers, score, divergence, score_residual, counts, Nc, partition.
+  centers, score, divergence, counts, Nc, partition.
 """
 function KGMM(σ::Real, μ::AbstractMatrix{<:Real};
               prob::Float64=1e-3,
@@ -305,11 +307,11 @@ function KGMM(σ::Real, μ::AbstractMatrix{<:Real};
                                      prob=prob, do_print=show_progress,
                                      conv_param=conv_param, i_max=i_max)
 
-    score, divergence, score_residual =
+    score, divergence =
         _score_and_divergence(Ez, Emu, Xc, Ezz2, σ; convention=convention)
 
     return (centers=Xc, score=score, divergence=divergence,
-            score_residual=score_residual, counts=counts, Nc=C, partition=ssp)
+            score_residual=nothing, counts=counts, Nc=C, partition=ssp)
 end
 
 """
