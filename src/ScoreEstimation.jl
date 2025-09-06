@@ -11,7 +11,7 @@ using Flux
 
 
 include("preprocessing.jl")
-include("training_new.jl")
+include("training.jl")
 
 # Public API
 export KGMM

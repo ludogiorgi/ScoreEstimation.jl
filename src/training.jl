@@ -25,7 +25,8 @@ function generate_xz(Y::AbstractMatrix, σ::Real)
     D, N = size(Y)
     T = Float32
     Z = randn(T, D, N)
-    X = @views T.(Y) .+ T(σ) .* Z
+    Yf = (eltype(Y) === T) ? Y : T.(Y)
+    X = @views Yf .+ T(σ) .* Z
     return X, Z
 end
 
@@ -111,9 +112,9 @@ function train(obs, n_epochs, batch_size, neurons::Vector{Int}, σ::Real;
     opt_state = Flux.setup(opt, nn)
 
     losses = Float32[]
-    epoch_iterator = verbose ? ProgressBar(1:n_epochs) : (1:n_epochs)
-    for _ in epoch_iterator
-        X, Z = generate_data(obs, σ)
+    obsf = Float32.(obs)
+    for _ in 1:n_epochs
+        X, Z = generate_data(obsf, σ)
         Xd, Zd = device(X), device(Z)
         _ = nn(@view Xd[:, 1:min(batch_size, size(Xd,2))])  # warmup
         loader = Flux.DataLoader((Xd, Zd), batchsize=batch_size, shuffle=true)
@@ -149,9 +150,8 @@ function divergence_hutchinson(nn::Flux.Chain, X::AbstractMatrix;
     B = size(X, 2)
     div = similar(X, T, 1, B); fill!(div, zero(T))
     for _ in 1:probes
-        # Allocate V to match nn(X) output shape and device
-        Y = nn(X)
-        V = similar(Y)
+        # Allocate V to match output shape (assume D_out == D_in)
+        V = similar(X)
         if rademacher
             rand!(V)
             @. V = ifelse(V > T(0.5), one(T), -one(T))
@@ -199,9 +199,9 @@ function train(obs, n_epochs, batch_size, nn::Chain, σ::Real;
     opt_state = Flux.setup(opt, nn)
     losses = Float32[]
 
-    epoch_iterator = verbose ? ProgressBar(1:n_epochs) : (1:n_epochs)
-    for _ in epoch_iterator
-        X, Z = generate_data(obs, σ)
+    obsf = Float32.(obs)
+    for _ in 1:n_epochs
+        X, Z = generate_data(obsf, σ)
         Xd, Zd = device(X), device(Z)
         _ = nn(@view Xd[:, 1:min(batch_size, size(Xd,2))])
         loader = Flux.DataLoader((Xd, Zd), batchsize=batch_size, shuffle=true)
@@ -240,8 +240,7 @@ function train(obs_tuple, n_epochs, batch_size, neurons;
     loader = Flux.DataLoader((Xd, Zd), batchsize=batch_size, shuffle=true)
 
     losses = Float32[]
-    epoch_iterator = verbose ? ProgressBar(1:n_epochs) : (1:n_epochs)
-    for _ in epoch_iterator
+    for _ in 1:n_epochs
         ep = zero(Float32)
         for (Xb, Zb) in loader
             loss, grads = Flux.withgradient(nn) do m
@@ -283,8 +282,7 @@ function train(obs_tuple::Tuple{<:AbstractMatrix,<:AbstractMatrix,<:AbstractVect
     loader = Flux.DataLoader((Xd, Zd, wd), batchsize=batch_size, shuffle=true)
 
     losses = Float32[]
-    epoch_iterator = verbose ? ProgressBar(1:n_epochs) : (1:n_epochs)
-    for _ in epoch_iterator
+    for _ in 1:n_epochs
         ep = zero(Float32)
         for (Xb, Zb, wb) in loader
             loss, grads = Flux.withgradient(nn) do m
@@ -306,9 +304,9 @@ Evaluate average MSE over random draws X = Y + σ·ε.
 """
 function check_loss(obs, nn, σ::Real; n_samples=1, verbose=false)
     loss = 0.0
-    sample_iterator = verbose ? ProgressBar(1:n_samples) : (1:n_samples)
-    for _ in sample_iterator
-        X, Z = generate_data(obs, σ)
+    obsf = Float32.(obs)
+    for _ in 1:n_samples
+        X, Z = generate_data(obsf, σ)
         loss += loss_score(nn, X, Z)
     end
     return loss / n_samples

@@ -136,7 +136,7 @@ Plots.scatter!(plt1, centers_sorted, scores_sorted; color=:green, ms=3, msw=0, l
 plt2 = Plots.plot(centers_sorted, div_nn_sorted;
                      color=:blue, lw=2, label="NN (divergence)",
                      xlabel="x (normalized)", ylabel="divergence",
-                     title="Divergence: NN vs Analytic & KGMM")
+                     title="Divergence: NN vs Analytic & KGMM", ylims=(-4, 4))
 Plots.plot!(plt2, centers_sorted, divs_true; color=:red, lw=2, label="Analytic divergence")
 Plots.scatter!(plt2, centers_sorted, divs_sorted; color=:green, ms=3, msw=0, label="KGMM divergence (centers)")
 
