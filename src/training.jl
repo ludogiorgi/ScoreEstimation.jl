@@ -183,6 +183,48 @@ function _divergence_from_eps(nn::Flux.Chain, X::AbstractMatrix;
     return @. -(d_eps) / Float32(σ)
 end
 
+############################
+#  Jacobian of the score   #
+############################
+
+"""
+    _jacobian_from_eps(nn, X) -> Jε
+
+Compute the exact Jacobian of the ε-predictor `nn` at batched inputs `X`.
+Returns a 3D array with shape `(D_out, D_in, B)` for each column in `X`.
+
+Implementation uses reverse-mode accumulation of rows via
+`gX = ∇_X sum(nn(X) .* V)` with `V[i, :] .= 1`, which yields row `i` of the
+Jacobian for all batch columns at once. Works on CPU and GPU.
+"""
+function _jacobian_from_eps(nn::Flux.Chain, X::AbstractMatrix)
+    T = eltype(X)
+    D, B = size(X)
+    J = similar(X, T, D, D, B)  # (D_out, D_in, B)
+    # Accumulate rows i = 1..D across the whole batch in D reverse-mode passes
+    for i in 1:D
+        V = zero(X)
+        @views V[i, :] .= one(T)
+        gX = Flux.gradient(x -> sum(nn(x) .* V), X)[1]  # gX[:, j] = (J_j)' * e_i = row i of J_j
+        @inbounds for j in 1:B
+            @views J[i, :, j] .= gX[:, j]
+        end
+    end
+    return J
+end
+
+"""
+    _jacobian_score(nn, X; σ) -> J_s
+
+Return the Jacobian of the score s(x) = -(1/σ) ε̂(x) at batched inputs `X`.
+Shape: `(D, D, B)` where `B` is the number of columns in `X`.
+"""
+function _jacobian_score(nn::Flux.Chain, X::AbstractMatrix; σ::Real)
+    Jε = _jacobian_from_eps(nn, X)
+    @. Jε = -(Jε) / Float32(σ)
+    return Jε
+end
+
 """
     train(obs, n_epochs, batch_size, nn::Chain, σ::Real; kwargs...)
 
@@ -362,7 +404,8 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
                kgmm_kwargs=(;),
                divergence::Bool=false,
                probes::Integer=1,
-               rademacher::Bool=true)
+               rademacher::Bool=true,
+               jacobian::Bool=false)
 
     opt = Flux.Adam(Float32(lr))
     device = (use_gpu && CUDA.functional()) ? gpu : cpu
@@ -379,7 +422,17 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
         else
             X -> zeros(eltype(X), 1, size(X,2))
         end
-        return nn, losses, Float32[], div_fn, nothing
+        jac_fn = if jacobian
+            let nn=nn, device=device, σ=σ
+                X -> begin
+                    Xd = device(Float32.(X))
+                    Array(_jacobian_score(nn, Xd; σ=σ))
+                end
+            end
+        else
+            X -> zeros(eltype(X), size(X,1), size(X,1), size(X,2))
+        end
+        return nn, losses, Float32[], div_fn, jac_fn, nothing
     else
         # Compute KGMM via the project module; expects `ScoreEstimation` to be in scope.
         res = ScoreEstimation.KGMM(σ, obs; kgmm_kwargs...)
@@ -396,6 +449,16 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
         else
             Xq -> zeros(eltype(Xq), 1, size(Xq,2))
         end
-        return nn, losses, Float32[], div_fn, res
+        jac_fn = if jacobian
+            let nn=nn, device=device, σ=σ
+                Xq -> begin
+                    Xd = device(Float32.(Xq))
+                    Array(_jacobian_score(nn, Xd; σ=σ))
+                end
+            end
+        else
+            Xq -> zeros(eltype(Xq), size(Xq,1), size(Xq,1), size(Xq,2))
+        end
+        return nn, losses, Float32[], div_fn, jac_fn, res
     end
 end

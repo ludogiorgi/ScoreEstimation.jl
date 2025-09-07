@@ -1,6 +1,6 @@
 # ScoreEstimation — KGMM + NN Score Estimation in Julia
 
-This repository provides a fast Julia implementation of KGMM and a lightweight Flux-based training wrapper to estimate the score s(x) = ∇x log p(x) and its divergence ∇·s from data. It combines a kernelized GMM (via state‑space partitioning) with a compact MLP interpolator for strong accuracy and efficiency.
+This repository provides a fast Julia implementation of KGMM and a lightweight Flux-based training wrapper to estimate the score s(x) = ∇x log p(x), its divergence ∇·s, and (optionally) its Jacobian ∂s/∂x from data. It combines a kernelized GMM (via state‑space partitioning) with a compact MLP interpolator for strong accuracy and efficiency.
 
 ## Overview
 
@@ -69,24 +69,25 @@ D, N = size(obs)
 σ = 0.1
 
 # Train with KGMM preprocessing (recommended)
-nn, losses, _, div_fn, kgmm = ScoreEstimation.train(
+nn, losses, _, div_fn, jac_fn, kgmm = ScoreEstimation.train(
     obs; preprocessing=true, σ=σ, neurons=[D, 128, 128, D],
     n_epochs=200, batch_size=1024, lr=1e-3, use_gpu=false, verbose=true,
     kgmm_kwargs=(prob=0.001, conv_param=1e-2, i_max=100, show_progress=false),
-    divergence=true, probes=1)
+    divergence=true, probes=1, jacobian=true)
 
-# Score and divergence closures
+# Score, divergence, and Jacobian closures
 sθ = X -> -nn(Float32.(X)) ./ Float32(σ)
 ∇·sθ = X -> div_fn(X)  # returns (1, B)
+J_s = X -> jac_fn(X)   # returns (D, D, B)
 ```
 
 Alternatively, raw DSM training (no preprocessing):
 
 ```julia
-nn, losses, _, div_fn, _ = ScoreEstimation.train(
+nn, losses, _, div_fn, jac_fn, _ = ScoreEstimation.train(
     obs; preprocessing=false, σ=σ, neurons=[D, 128, 128, D],
     n_epochs=200, batch_size=1024, lr=1e-3, use_gpu=false, verbose=true,
-    divergence=true, probes=1)
+    divergence=true, probes=1, jacobian=true)
 ```
 
 ### Conventions
@@ -98,6 +99,7 @@ This repository uses a single, standard smoothing convention
 - ∇·s(x) = (E[‖z‖² | x] − d)/σ² − ‖s(x)‖²
 
 The NN models learn ε̂(x) ≈ E[z | x] and are converted to score/divergence via the identities above.
+When `jacobian=true`, the training wrapper also exposes a closure `jac_fn(X)` that returns the exact Jacobian of the score at batch columns `X` with shape `(D, D, B)`. It is computed efficiently via reverse-mode accumulation of Jacobian rows in `D` passes (works on CPU and GPU).
 
 ### Progress Bars
 
