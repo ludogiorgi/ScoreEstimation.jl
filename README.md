@@ -70,7 +70,7 @@ D, N = size(obs)
 
 # Train with KGMM preprocessing (recommended)
 nn, losses, _, div_fn, jac_fn, kgmm = ScoreEstimation.train(
-    obs; preprocessing=true, σ=σ, neurons=[D, 128, 128, D],
+    obs; preprocessing=true, σ=σ, neurons=[128, 128],
     n_epochs=200, batch_size=1024, lr=1e-3, use_gpu=false, verbose=true,
     kgmm_kwargs=(prob=0.001, conv_param=1e-2, i_max=100, show_progress=false),
     divergence=true, probes=1, jacobian=true)
@@ -85,7 +85,7 @@ Alternatively, raw DSM training (no preprocessing):
 
 ```julia
 nn, losses, _, div_fn, jac_fn, _ = ScoreEstimation.train(
-    obs; preprocessing=false, σ=σ, neurons=[D, 128, 128, D],
+    obs; preprocessing=false, σ=σ, neurons=[128, 128],
     n_epochs=200, batch_size=1024, lr=1e-3, use_gpu=false, verbose=true,
     divergence=true, probes=1, jacobian=true)
 ```

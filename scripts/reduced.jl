@@ -16,7 +16,7 @@ using Statistics
 using Flux
 using FastSDE
 using Statistics
-##
+
 # ---------------- Problem setup ----------------
 
 const params = (a=-0.0222, b=-0.2, c=0.0494, F_tilde=0.6, s=0.7071)
@@ -84,7 +84,7 @@ divergence_true_norm(x, p=params)  = normalize_divergence(divergence_true, x, M,
 
 ############## Train NN (DSM) and get divergence via Hutchinson ##############
 
-neurons = [size(obs_uncorr,1), 100, 50, size(obs_uncorr,1)]  # D -> 100 -> 50 -> D
+neurons = [100, 50]  # hidden layers only; input/output inferred from data dim
 
 # Train ε-net on-the-fly draws; ask wrapper for divergence and return KGMM when preprocessing=true
 @time nn, train_losses, _, div_fn, res_wrapped = ScoreEstimation.train(
@@ -168,7 +168,6 @@ rmse_d_nn_kg     = rmse(div_nn_v,   div_kgmm_v)
 @info "RMSE (score):  NN vs True = $(rmse_s_nn_true),  KGMM vs True = $(rmse_s_kg_true),  NN vs KGMM = $(rmse_s_nn_kg)"
 @info "RMSE (divergence):  NN vs True = $(rmse_d_nn_true),  KGMM vs True = $(rmse_d_kg_true),  NN vs KGMM = $(rmse_d_nn_kg)"
 
-##
 ##############################
 #  Compare: NN vs NN+KGMM    #
 ##############################

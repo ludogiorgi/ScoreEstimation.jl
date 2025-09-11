@@ -27,7 +27,7 @@ using ScoreEstimation
     # Training wrapper (preprocessing=true)
     @testset "Train with KGMM" begin
         nn, losses, _, div_fn, jac_fn, res = ScoreEstimation.train(obs;
-            preprocessing=true, σ=σ, neurons=[D, 16, D], n_epochs=3, batch_size=64,
+            preprocessing=true, σ=σ, neurons=[16], n_epochs=3, batch_size=64,
             lr=1e-3, use_gpu=false, verbose=false, kgmm_kwargs=(prob=0.05, conv_param=5e-2, i_max=10, show_progress=false),
             divergence=true, probes=1, jacobian=true)
         @test length(losses) == 3
@@ -46,7 +46,7 @@ using ScoreEstimation
     # Training wrapper (preprocessing=false)
     @testset "Train raw DSM" begin
         nn, losses, _, div_fn, jac_fn, res = ScoreEstimation.train(obs;
-            preprocessing=false, σ=σ, neurons=[D, 16, D], n_epochs=3, batch_size=64,
+            preprocessing=false, σ=σ, neurons=[16], n_epochs=3, batch_size=64,
             lr=1e-3, use_gpu=false, verbose=false, divergence=true, probes=1, jacobian=true)
         @test length(losses) == 3
         @test res === nothing

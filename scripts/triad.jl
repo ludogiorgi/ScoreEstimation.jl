@@ -42,7 +42,7 @@ obs_uncorr = obs
 
 # ---------------- Training ----------------
 σ_value = 0.05
-neurons = [dim, 128, 64, dim]
+neurons = [128, 64]  # hidden layers only; input/output inferred from data dim
 
 # Preprocessing=true (KGMM + weighted interpolation)
 nn_k, losses_k, _, div_k, kgmm = ScoreEstimation.train(

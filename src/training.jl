@@ -55,7 +55,8 @@ _swish(x) = x .* Flux.sigmoid.(x)
 """
     _build_mlp(neurons::Vector{Int}; activation=_swish, last_activation=identity)
 
-Create an MLP with architecture defined by `neurons`.
+Create an MLP with architecture defined by `neurons` (full layer sizes including
+input and output). Internal helper.
 """
 function _build_mlp(neurons::Vector{Int}; activation=_swish, last_activation=identity)
     layers = Vector{Any}(undef, length(neurons) - 1)
@@ -64,6 +65,18 @@ function _build_mlp(neurons::Vector{Int}; activation=_swish, last_activation=ide
     end
     layers[end] = Flux.Dense(neurons[end-1], neurons[end], last_activation)
     return Flux.Chain(layers...)
+end
+
+"""
+    _build_mlp_from_hidden(D::Integer, hidden::Vector{Int}; activation=_swish, last_activation=identity)
+
+Create an MLP with input/output size `D` and hidden layer sizes given by `hidden`.
+User-facing APIs should pass only `hidden` sizes; the first and last layer sizes
+are inferred as `D`.
+"""
+function _build_mlp_from_hidden(D::Integer, hidden::Vector{Int}; activation=_swish, last_activation=identity)
+    full = isempty(hidden) ? [D, D] : vcat(D, hidden, D)
+    return _build_mlp(full; activation=activation, last_activation=last_activation)
 end
 
 """
@@ -100,6 +113,9 @@ end
     train(obs, n_epochs, batch_size, neurons::Vector{Int}, σ::Real; kwargs...)
 
 Train a new ε-network (predicts z) with fixed σ.
+
+Note: `neurons` contains only the hidden layer sizes. The input and output
+layer sizes are automatically inferred as the system dimension `D = size(obs,1)`.
 """
 function train(obs, n_epochs, batch_size, neurons::Vector{Int}, σ::Real; 
                opt=Flux.Adam(0.001), activation=_swish, last_activation=identity,
@@ -110,7 +126,8 @@ function train(obs, n_epochs, batch_size, neurons::Vector{Int}, σ::Real;
         println("Using " * (device === gpu ? "GPU" : "CPU"))
     end
 
-    nn = _build_mlp(neurons, activation=activation, last_activation=last_activation) |> device |> Flux.f32
+    D = size(obs, 1)
+    nn = _build_mlp_from_hidden(D, neurons; activation=activation, last_activation=last_activation) |> device |> Flux.f32
     opt_state = Flux.setup(opt, nn)
 
     losses = Float32[]
@@ -268,6 +285,9 @@ end
     train(obs_tuple, n_epochs, batch_size, neurons; kwargs...)
 
 Train on a precomputed dataset `(X, Z)` (e.g., from KGMM centers).
+
+Note: `neurons` contains only the hidden layer sizes. The first and last layer
+sizes are inferred from `size(X,1)`.
 """
 function train(obs_tuple, n_epochs, batch_size, neurons; 
                opt=Flux.Adam(0.001), activation=_swish, last_activation=identity,
@@ -279,7 +299,8 @@ function train(obs_tuple, n_epochs, batch_size, neurons;
         println("Using " * (device === gpu ? "GPU" : "CPU"))
     end
 
-    nn = _build_mlp(neurons, activation=activation, last_activation=last_activation) |> device |> Flux.f32
+    D = size(X, 1)
+    nn = _build_mlp_from_hidden(D, neurons; activation=activation, last_activation=last_activation) |> device |> Flux.f32
     opt_state = Flux.setup(opt, nn)
     Xd, Zd = device(Float32.(X)), device(Float32.(Z))
     _ = nn(@view Xd[:, 1:min(batch_size, size(Xd,2))])
@@ -309,6 +330,9 @@ end
 
 Train on a precomputed weighted dataset where `w` are per-sample weights
 (e.g., KGMM cluster counts). Uses weighted MSE.
+
+Note: `neurons` contains only the hidden layer sizes. The first and last layer
+sizes are inferred from `size(X,1)`.
 """
 function train(obs_tuple::Tuple{<:AbstractMatrix,<:AbstractMatrix,<:AbstractVector},
                n_epochs::Integer,
@@ -323,7 +347,8 @@ function train(obs_tuple::Tuple{<:AbstractMatrix,<:AbstractMatrix,<:AbstractVect
         println("Using " * (device === gpu ? "GPU" : "CPU"))
     end
 
-    nn = _build_mlp(neurons, activation=activation, last_activation=last_activation) |> device |> Flux.f32
+    D = size(X, 1)
+    nn = _build_mlp_from_hidden(D, neurons; activation=activation, last_activation=last_activation) |> device |> Flux.f32
     opt_state = Flux.setup(opt, nn)
     Xd, Zd = device(Float32.(X)), device(Float32.(Z))
     wd = device(Float32.(w))
@@ -383,7 +408,7 @@ function _dataset_from_kgmm(res::NamedTuple, σ::Real)
 end
 
 """
-    train(obs; preprocessing=false, σ=0.1, neurons=[D,128,128,D],
+    train(obs; preprocessing=false, σ=0.1, neurons=[128,128],
           n_epochs=50, batch_size=8192, lr=1e-2, use_gpu=false, verbose=true,
           kgmm_kwargs=(;))
 
@@ -395,7 +420,7 @@ Returns `(nn, train_losses, val_losses, div_fn, kgmm)`; `val_losses` is empty in
 """
 function train(obs::AbstractMatrix; preprocessing::Bool=false,
                σ::Real=0.1,
-               neurons::Vector{Int}=[size(obs,1),128,128,size(obs,1)],
+               neurons::Vector{Int}=[128,128],
                n_epochs::Int=50,
                batch_size::Int=8192,
                lr::Float64=1e-2,
