@@ -326,6 +326,48 @@ function train(obs_tuple, n_epochs, batch_size, neurons;
 end
 
 """
+    train((X, Z), n_epochs, batch_size, nn::Chain; kwargs...)
+
+Continue training an existing ε-network on a precomputed dataset `(X, Z)`.
+"""
+function train(obs_tuple::Tuple{<:AbstractMatrix,<:AbstractMatrix},
+               n_epochs::Integer,
+               batch_size::Integer,
+               nn::Chain;
+               opt=Flux.Adam(0.001), use_gpu=true, verbose=false)
+
+    X, Z = obs_tuple
+    device = (use_gpu && CUDA.functional()) ? gpu : cpu
+    if verbose
+        println("Using " * (device === gpu ? "GPU" : "CPU"))
+    end
+
+    nn = nn |> device |> Flux.f32
+    opt_state = Flux.setup(opt, nn)
+    Xd, Zd = device(Float32.(X)), device(Float32.(Z))
+    _ = nn(@view Xd[:, 1:min(batch_size, size(Xd,2))])
+    loader = Flux.DataLoader((Xd, Zd), batchsize=batch_size, shuffle=true)
+
+    losses = Float32[]
+    verbose && (p = Progress(n_epochs; desc="Epochs", showspeed=false))
+    for e in 1:n_epochs
+        ep = zero(Float32)
+        for (Xb, Zb) in loader
+            loss, grads = Flux.withgradient(nn) do m
+                Flux.mse(m(Xb), Zb)
+            end
+            Flux.update!(opt_state, nn, grads[1])
+            ep += Float32(loss)
+        end
+        push!(losses, ep / length(loader))
+        verbose && next!(p)
+    end
+    verbose && finish!(p)
+
+    return nn, losses
+end
+
+"""
     train((X, Z, w), n_epochs, batch_size, neurons; ...)
 
 Train on a precomputed weighted dataset where `w` are per-sample weights
@@ -349,6 +391,50 @@ function train(obs_tuple::Tuple{<:AbstractMatrix,<:AbstractMatrix,<:AbstractVect
 
     D = size(X, 1)
     nn = _build_mlp_from_hidden(D, neurons; activation=activation, last_activation=last_activation) |> device |> Flux.f32
+    opt_state = Flux.setup(opt, nn)
+    Xd, Zd = device(Float32.(X)), device(Float32.(Z))
+    wd = device(Float32.(w))
+    _ = nn(@view Xd[:, 1:min(batch_size, size(Xd,2))])
+    loader = Flux.DataLoader((Xd, Zd, wd), batchsize=batch_size, shuffle=true)
+
+    losses = Float32[]
+    verbose && (p = Progress(n_epochs; desc="Epochs", showspeed=false))
+    for e in 1:n_epochs
+        ep = zero(Float32)
+        for (Xb, Zb, wb) in loader
+            loss, grads = Flux.withgradient(nn) do m
+                _weighted_mse(m(Xb), Zb, vec(wb))
+            end
+            Flux.update!(opt_state, nn, grads[1])
+            ep += Float32(loss)
+        end
+        push!(losses, ep / length(loader))
+        verbose && next!(p)
+    end
+    verbose && finish!(p)
+
+    return nn, losses
+end
+
+"""
+    train((X, Z, w), n_epochs, batch_size, nn::Chain; ...)
+
+Continue training an existing ε-network on a precomputed weighted dataset
+where `w` are per-sample weights (e.g., KGMM cluster counts). Uses weighted MSE.
+"""
+function train(obs_tuple::Tuple{<:AbstractMatrix,<:AbstractMatrix,<:AbstractVector},
+               n_epochs::Integer,
+               batch_size::Integer,
+               nn::Chain;
+               opt=Flux.Adam(0.001), use_gpu=true, verbose=false)
+
+    X, Z, w = obs_tuple
+    device = (use_gpu && CUDA.functional()) ? gpu : cpu
+    if verbose
+        println("Using " * (device === gpu ? "GPU" : "CPU"))
+    end
+
+    nn = nn |> device |> Flux.f32
     opt_state = Flux.setup(opt, nn)
     Xd, Zd = device(Float32.(X)), device(Float32.(Z))
     wd = device(Float32.(w))
@@ -410,7 +496,7 @@ end
 """
     train(obs; preprocessing=false, σ=0.1, neurons=[128,128],
           n_epochs=50, batch_size=8192, lr=1e-2, use_gpu=false, verbose=true,
-          kgmm_kwargs=(;))
+          kgmm_kwargs=(;), nn=nothing)
 
 High-level wrapper:
 - preprocessing=false: ε-training from random draws X=Y+σ·ε.
@@ -430,13 +516,21 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
                divergence::Bool=false,
                probes::Integer=1,
                rademacher::Bool=true,
-               jacobian::Bool=false)
+               jacobian::Bool=false,
+               nn::Union{Flux.Chain,Nothing}=nothing)
 
     opt = Flux.Adam(Float32(lr))
     device = (use_gpu && CUDA.functional()) ? gpu : cpu
 
     if !preprocessing
-        nn, losses = train(obs, n_epochs, batch_size, neurons, σ; opt=opt, use_gpu=use_gpu, verbose=verbose)
+        if nn === nothing
+            nn, losses = train(obs, n_epochs, batch_size, neurons, σ; opt=opt, use_gpu=use_gpu, verbose=verbose)
+        else
+            if verbose && !isempty(neurons)
+                println("Existing nn provided; ignoring neurons and continuing training.")
+            end
+            nn, losses = train(obs, n_epochs, batch_size, nn, σ; opt=opt, use_gpu=use_gpu, verbose=verbose)
+        end
         div_fn = if divergence
             let nn=nn, device=device, probes=probes, rademacher=rademacher, σ=σ
                 X -> begin
@@ -463,7 +557,14 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
         res = ScoreEstimation.KGMM(σ, obs; kgmm_kwargs...)
         X, Z = _dataset_from_kgmm(res, σ)
         w    = Float32.(res.counts)
-        nn, losses = train((X, Z, w), n_epochs, batch_size, neurons; opt=opt, use_gpu=use_gpu, verbose=verbose)
+        if nn === nothing
+            nn, losses = train((X, Z, w), n_epochs, batch_size, neurons; opt=opt, use_gpu=use_gpu, verbose=verbose)
+        else
+            if verbose && !isempty(neurons)
+                println("Existing nn provided; ignoring neurons and continuing training on KGMM dataset.")
+            end
+            nn, losses = train((X, Z, w), n_epochs, batch_size, nn; opt=opt, use_gpu=use_gpu, verbose=verbose)
+        end
         div_fn = if divergence
             let nn=nn, device=device, probes=probes, rademacher=rademacher, σ=σ
                 Xq -> begin
