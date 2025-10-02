@@ -9,12 +9,14 @@ using Base.Threads
 using Statistics
 using Flux
 using ProgressMeter
+using KernelDensity
 
 
 include("preprocessing.jl")
 include("training.jl")
+include("relative_entropy.jl")
 
 # Public API
-export train
+export train, relative_entropy
 
 end # module

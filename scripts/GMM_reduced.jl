@@ -305,3 +305,27 @@ end
 @info "Saved figures/reduced_training_loss.png"
 @info "Saved figures/GMM_figures/reduced.png"
 @info "Saved data/GMM_data/reduced.h5"
+
+# ---------------- Test relative_entropy function ----------------
+@info "Testing relative_entropy function..."
+
+# Test 1D case: compare observed data with NN-generated and analytically-generated trajectories
+kl_obs_vs_nn = ScoreEstimation.relative_entropy(vec(obs), vec(traj_nn))
+kl_obs_vs_true = ScoreEstimation.relative_entropy(vec(obs), vec(traj_true))
+kl_true_vs_nn = ScoreEstimation.relative_entropy(vec(traj_true), vec(traj_nn))
+
+@info "1D Relative Entropy Results:"
+@info "  D_KL(obs || NN):    $kl_obs_vs_nn"
+@info "  D_KL(obs || True):  $kl_obs_vs_true"
+@info "  D_KL(True || NN):   $kl_true_vs_nn"
+
+# Test multi-dimensional case: create synthetic 2D data
+d = 2
+n_samples = 2000
+X1 = randn(d, n_samples)
+X2 = randn(d, n_samples) .+ [0.5, 0.3]  # Shifted distribution
+
+kl_vec = ScoreEstimation.relative_entropy(X1, X2)
+
+@info "Multi-dimensional (2D) Relative Entropy Results:"
+@info "  D_KL(X1 || X2) per dimension: $kl_vec"
