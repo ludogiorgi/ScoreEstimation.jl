@@ -1,10 +1,10 @@
 #############################
-#  preprocessing.jl (KGMM)  #
+#  preprocessing.jl (kgmm)  #
 #############################
 # Functions only. No `module`/`using`/`export` here.
 #
 # This file implements a kernel GMM estimator over a state-space
-# partition. The public entry point is `KGMM`, which accepts a noise
+# partition. The public entry point is `kgmm`, which accepts a noise
 # scale σ (scalar or vector) and a data matrix μ, and returns for each σ:
 #   - centers        : per-cluster centroids (E[x | cluster])
 #   - score          : score at centers (standard: s = -(1/σ) E[z|x])
@@ -280,17 +280,17 @@ end
 # --------------------------------------------------------------------------
 
 """
-    KGMM(σ::Real, μ; prob=1e-3, conv_param=1e-2, i_max=150,
+    kgmm(σ::Real, μ; prob=1e-3, conv_param=1e-2, i_max=150,
          show_progress=false)
 
-    KGMM(σs::AbstractVector{<:Real}, μ; ...)
+    kgmm(σs::AbstractVector{<:Real}, μ; ...)
 
 Kernel GMM estimator on a state-space partition learned at each σ.
 Divergence statistics are accumulated **during** the EMA loop.
 For each σ, returns a `NamedTuple` with:
   centers, score, divergence, counts, Nc, partition.
 """
-function KGMM(σ::Real, μ::AbstractMatrix{<:Real};
+function kgmm(σ::Real, μ::AbstractMatrix{<:Real};
               prob::Float64=1e-3,
               conv_param::Float64=1e-2,
               i_max::Int=150,
@@ -307,14 +307,14 @@ function KGMM(σ::Real, μ::AbstractMatrix{<:Real};
 end
 
 """
-    KGMM(σs::AbstractVector{<:Real}, μ; kwargs...) -> Vector{NamedTuple}
+    kgmm(σs::AbstractVector{<:Real}, μ; kwargs...) -> Vector{NamedTuple}
 
-Vectorized convenience wrapper that applies `KGMM` to each σ in `σs`.
+Vectorized convenience wrapper that applies `kgmm` to each σ in `σs`.
 """
-function KGMM(σs::AbstractVector{<:Real}, μ::AbstractMatrix{<:Real}; kwargs...)
+function kgmm(σs::AbstractVector{<:Real}, μ::AbstractMatrix{<:Real}; kwargs...)
     out = Vector{NamedTuple}(undef, length(σs))
     @inbounds for k in eachindex(σs)
-        out[k] = KGMM(float(σs[k]), μ; kwargs...)
+        out[k] = kgmm(float(σs[k]), μ; kwargs...)
     end
     return out
 end

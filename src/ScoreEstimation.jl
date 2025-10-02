@@ -15,7 +15,6 @@ include("preprocessing.jl")
 include("training.jl")
 
 # Public API
-export KGMM
 export train
 
 end # module
