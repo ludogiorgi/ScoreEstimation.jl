@@ -1,20 +1,15 @@
-cd(@__DIR__)  # Change to the script's directory
 using Pkg
-Pkg.activate("..")  # Activate the parent directory project
+Pkg.activate(".")
 Pkg.instantiate()
 
 using ScoreEstimation
 using FastSDE
 using Statistics
-using KernelDensity
 using Plots
-using GLMakie
+using Flux
 using HDF5
 using Random
-
-if !isdefined(ScoreEstimation, :KGMM)
-    ScoreEstimation.eval(:(const KGMM = kgmm))
-end
+using KernelDensity
 
 # ---------------- Reduced one-dimensional model ----------------
 const reduced_params = (
@@ -48,20 +43,31 @@ function drift_reduced!(du, u, t)
 end
 
 function diffusion_reduced!(du, u, t)
-    du[1] = sqrt(((coeffs.A - coeffs.B * u[1])^2 + coeffs.s^2) / 2)
+    du[1] = sqrt((coeffs.A - coeffs.B * u[1])^2 + coeffs.s^2)
     return nothing
 end
 
+"""
+    score_true_physical(x)
+
+Analytic score s(x) = ∂x log p(x) for the 1D SDE
+    dX = f(X) dt + g(X) dW,
+with
+    f(x) = -F̃ + a x + b x^2 - c x^3,
+    g(x)^2 = ((A - B x)^2 + s^2).
+
+Zero-flux stationary solution satisfies: f p - (1/2)∂x(g^2 p) = 0 ⇒
+    s(x) = ∂x log p(x) = (2 f(x) - ∂x g(x)^2) / g(x)^2.
+
+Here ∂x g^2 = -B (A - B x), so
+    s(x) = (2 f(x) + 2 B (A - B x)) / ( ((A - B x)^2 + s^2) )
+         = 2 (f(x) + B (A - B x)) / ((A - B x)^2 + s^2).
+"""
 function score_true_physical(x::Real)
-    # For SDE: dX = f(X)dt + g(X)dW
-    # Stationary score: s(x) = [2f(x) - g²'(x)] / g²(x)
-    # where g²(x) = [(A-Bx)² + s²]/2
-    # and g²'(x) = -B(A-Bx)
     f = -coeffs.F_tilde + coeffs.a * x + coeffs.b * x^2 - coeffs.c * x^3
-    g_squared = ((coeffs.A - coeffs.B * x)^2 + coeffs.s^2) / 2
-    g_squared_prime = -coeffs.B * (coeffs.A - coeffs.B * x)
-    numerator = 2 * f - g_squared_prime
-    return numerator / g_squared
+    g2 = (coeffs.A - coeffs.B * x)^2 + coeffs.s^2
+    dg2 = -2*coeffs.B * (coeffs.A - coeffs.B * x)
+    return (2*f - dg2) / g2
 end
 
 score_true_normalized(x::Real, mean_obs::Real, std_obs::Real) =
@@ -72,12 +78,12 @@ Random.seed!(1234)
 
 dim = 1
 dt = 0.01
-n_steps = 10_000
-resolution = 5
+n_steps = 100_000
+resolution = 100
 initial_state = zeros(dim)
 
 obs_nn = evolve(initial_state, dt, n_steps, drift_reduced!, diffusion_reduced!;
-                timestepper=:euler, resolution=resolution, sigma_inplace=true, n_ens=100)
+                timestepper=:euler, resolution=resolution, sigma_inplace=true, n_ens=100, boundary=(-10,10))
 
 @info "Trajectory shape" size(obs_nn)
 
@@ -86,246 +92,326 @@ std_obs = std(obs_nn)
 obs = (obs_nn .- mean_obs) ./ std_obs
 obs_uncorr = obs
 
-# ---------------- Analytic helpers ----------------
-score_true_norm_vec(x) = [score_true_normalized(xi, mean_obs, std_obs) for xi in x]
 score_true_norm_scalar(x::Real) = score_true_normalized(x, mean_obs, std_obs)
 
-# ---------------- KGMM + NN training ----------------
+# ---------------- Langevin utilities ----------------
+"""
+    generate_langevin_samples(score_scalar_fn; dt, n_steps, resolution, n_ens, boundary=(-5,5))
+
+Sample using FastSDE.evolve with drift = score and diffusion = sqrt(2) (normalized space).
+"""
+function generate_langevin_samples(score_scalar_fn; dt, n_steps, resolution, n_ens, boundary=(-10,10))
+    function drift!(du, u, t)
+        du[1] = score_scalar_fn(u[1])
+        return nothing
+    end
+    function unit_diffusion!(du, u, t)
+        du[1] = sqrt(2.0)
+        return nothing
+    end
+    samples = evolve([0.0], dt, n_steps, drift!, unit_diffusion!;
+                     timestepper=:euler, resolution=resolution,
+                     sigma_inplace=true, n_ens=n_ens, boundary=boundary)
+    return vec(samples)
+end
+
+Random.seed!(42)
+dt_gen = 0.005
+n_steps_gen = 2_000_000
+resolution_gen = 200
+n_ens_gen = 1
+
+# Generate from the original SDE in physical space
+true_samples = generate_langevin_samples(score_true_norm_scalar;
+    dt=dt_gen,
+    n_steps=n_steps_gen,
+    resolution=resolution_gen,
+    n_ens=n_ens_gen,
+    boundary=(-10, 10))
+
+kde_true = kde(true_samples)
+
+const REL_ENT_POINTS = 2048
+
+# ---------------- Helpers ----------------
+function score_from_nn_scalar(nn, sigma)
+    buf = zeros(Float32, 1, 1)
+    function inner(x::Real)
+        buf[1] = Float32(x)
+        y = nn(buf)
+        return -Float64(y[1]) / Float64(sigma)
+    end
+    return inner
+end
+
+function train_without_preprocessing(obs, epochs; sigma, neurons, batch_size, lr, seed)
+    Random.seed!(seed)
+    nn = nothing
+    losses = nothing
+    elapsed = @elapsed begin
+        nn, losses, _, _, _, _ = ScoreEstimation.train(
+            obs;
+            preprocessing=false,
+            σ=sigma,
+            neurons=neurons,
+            n_epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            use_gpu=false,
+            verbose=false,
+            divergence=false,
+        )
+    end
+    return nn, losses, elapsed
+end
+
+function prob_for_clusters(nc::Int)
+    if nc <= 60
+        return 0.012
+    elseif nc <= 120
+        return 0.006
+    elseif nc <= 180
+        return 0.004
+    elseif nc <= 240
+        return 0.0029
+    else
+        return 0.0025
+    end
+end
+
+function train_with_preprocessing(obs, epochs, nc_target;
+        sigma, neurons, batch_size, lr, seed,
+        conv_param=1e-4, i_max=120, show_progress=false)
+    Random.seed!(seed)
+    prob = prob_for_clusters(nc_target)
+    kgmm_kwargs = (prob=prob, conv_param=conv_param, i_max=i_max, show_progress=show_progress)
+    nn = nothing; losses = nothing; res = nothing
+    elapsed = @elapsed begin
+        nn, losses, _, _, _, res = ScoreEstimation.train(
+            obs;
+            preprocessing=true,
+            σ=sigma,
+            neurons=neurons,
+            n_epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            use_gpu=false,
+            verbose=false,
+            kgmm_kwargs=kgmm_kwargs,
+            divergence=false,
+        )
+    end
+    return nn, losses, elapsed, res.Nc, prob
+end
+
+# ---------------- Experiment configuration ----------------
 sigma_value = 0.05
-neurons = [128, 64]
-train_epochs = 2000
-batch_size = 32
+neurons = [100, 50]
+batch_size = 16
+lr = 1e-3
+
+epochs_schedule = [5, 10, 15, 20]
+clusters_schedule = [60, 120, 180, 240, 300]
+preprocessing_epochs = 2000
 
 Plots.gr()
 
-@time nn, train_losses, _, _, _, kgmm_res = ScoreEstimation.train(
-    obs_uncorr;
-    preprocessing = true,
-    σ = sigma_value,
-    neurons = neurons,
-    n_epochs = train_epochs,
-    batch_size = batch_size,
-    lr = 1e-3,
-    use_gpu = false,
-    verbose = true,
-    kgmm_kwargs = (prob=0.002, conv_param=1e-3, i_max=120, show_progress=false),
-    divergence = false,
-)
+mkpath("figures/score_pdfs")
 
-@info "Number of KGMM clusters" kgmm_res.Nc
+# Warm-up runs to remove compilation bias from first measurements
+@info "Warm-up (preprocessing=false)"
+train_without_preprocessing(obs_uncorr, 1;
+    sigma=sigma_value,
+    neurons=neurons,
+    batch_size=batch_size,
+    lr=lr,
+    seed=9999)
 
-function score_nn_eval(x::AbstractVector{<:Real})
-    x_mat = reshape(Float32.(x), 1, :)
-    vals = -Array(nn(x_mat)) ./ Float32(sigma_value)
-    return Float64.(vec(vals))
+@info "Warm-up (preprocessing=true)"
+train_with_preprocessing(obs_uncorr, 1, clusters_schedule[1];
+    sigma=sigma_value,
+    neurons=neurons,
+    batch_size=batch_size,
+    lr=lr,
+    seed=19_999)
+
+# ---------------- Sweeps ----------------
+results_no_pre = Vector{NamedTuple}(undef, length(epochs_schedule))
+results_pre = Vector{NamedTuple}(undef, length(clusters_schedule))
+
+for (i, epochs) in enumerate(epochs_schedule)
+    seed = 10_000 + epochs
+    nn, losses, t_train = train_without_preprocessing(obs_uncorr, epochs;
+        sigma=sigma_value,
+        neurons=neurons,
+        batch_size=batch_size,
+        lr=lr,
+        seed=seed)
+    score_fn = score_from_nn_scalar(nn, sigma_value)
+    Random.seed!(111_111)
+    samples_nn = generate_langevin_samples(score_fn;
+        dt=dt_gen,
+        n_steps=n_steps_gen,
+        resolution=resolution_gen,
+        n_ens=n_ens_gen)
+    rel_ent = ScoreEstimation.relative_entropy(true_samples, samples_nn; npoints=REL_ENT_POINTS)
+    kde_nn = kde(samples_nn)
+    x_min = min(minimum(true_samples), minimum(samples_nn))
+    x_max = max(maximum(true_samples), maximum(samples_nn))
+    x_grid = range(x_min, x_max; length=400)
+    score_true_vals = score_true_norm_scalar.(x_grid)
+    score_nn_vals = map(score_fn, x_grid)
+    iter_fig = Plots.plot(layout=(2, 1), size=(900, 700))
+    # empirical KDE from normalized observations
+    kde_emp = kde(vec(obs))
+    Plots.plot!(iter_fig, kde_true.x, kde_true.density;
+        label="reference pdf (analytic score)",
+        xlabel="x",
+        ylabel="density",
+        title="Score PDFs (preprocessing = false, epochs = $(epochs))",
+        linewidth=2,
+        subplot=1,
+        legend=:topright)
+    Plots.plot!(iter_fig, kde_nn.x, kde_nn.density;
+        label="pdf (nn score)",
+        linewidth=2,
+        linestyle=:dash,
+        subplot=1)
+    Plots.plot!(iter_fig, kde_emp.x, kde_emp.density;
+        label="empirical pdf (obs)",
+        linewidth=2,
+        linestyle=:dot,
+        color=:gray,
+        subplot=1)
+    Plots.plot!(iter_fig, x_grid, score_true_vals;
+        label="analytic score",
+        xlabel="x",
+        ylabel="score",
+        title="Score Functions",
+        linewidth=2,
+        subplot=2,
+        legend=:topright)
+    Plots.plot!(iter_fig, x_grid, score_nn_vals;
+        label="nn score",
+        linewidth=2,
+        linestyle=:dash,
+        subplot=2)
+    display(iter_fig)
+    Plots.savefig(iter_fig, "figures/score_pdfs/pre_false_epochs_$(epochs).png")
+    results_no_pre[i] = (epochs=epochs, train_time=t_train, relative_entropy=rel_ent, final_loss=losses[end])
+    GC.gc()
+    @info "preprocessing=false" epochs=epochs train_time=t_train relative_entropy=rel_ent
 end
-score_nn_eval(x::Real) = score_nn_eval([x])[1]
 
-# ---------------- Score evaluation ----------------
-centers = Float64.(vec(kgmm_res.centers))
-kgmm_scores = Float64.(vec(kgmm_res.score))
-perm = sortperm(centers)
-centers_sorted = centers[perm]
-kgmm_scores_sorted = kgmm_scores[perm]
-score_nn_centers = score_nn_eval(centers_sorted)
-score_true_centers = score_true_norm_vec(centers_sorted)
-
-x_min = minimum(centers_sorted)
-x_max = maximum(centers_sorted)
-x_grid = collect(range(x_min - 0.5, x_max + 0.5, length=400))
-score_true_grid = score_true_norm_vec(x_grid)
-score_nn_grid = score_nn_eval(x_grid)
-
-plt_score = Plots.plot(x_grid, score_true_grid;
-    label="Analytic score",
-    color=:black,
-    xlabel="x (normalized)",
-    ylabel="score",
-    title="Score field")
-Plots.plot!(plt_score, x_grid, score_nn_grid; label="NN (interpolated)", color=:blue)
-Plots.scatter!(plt_score, centers_sorted, kgmm_scores_sorted; label="KGMM centers", color=:green, ms=4)
-Plots.scatter!(plt_score, centers_sorted, score_true_centers; label="Analytic @ centers", color=:red, ms=3, markerstrokewidth=0)
-
-plt_loss = Plots.plot(1:length(train_losses), train_losses;
-    yscale=:log10,
-    xlabel="Epoch",
-    ylabel="MSE",
-    title="Training loss (log10)",
-    legend=false)
-##
-# ---------------- Langevin generation ----------------
-dt_gen = 0.005
-n_steps_gen = 10_000
-resolution_gen = 5
-
-function drift_true!(du, u, t)
-    du[1] = score_true_norm_scalar(u[1])
-    return nothing
+for (i, nc) in enumerate(clusters_schedule)
+    seed = 20_000 + nc
+        nn, losses, t_train, nc_actual, prob_used = train_with_preprocessing(obs_uncorr, preprocessing_epochs, nc;
+        sigma=sigma_value,
+        neurons=neurons,
+        batch_size=batch_size,
+        lr=lr,
+        seed=seed)
+    score_fn = score_from_nn_scalar(nn, sigma_value)
+    Random.seed!(111_111)
+    samples_nn = generate_langevin_samples(score_fn;
+        dt=dt_gen,
+        n_steps=n_steps_gen,
+        resolution=resolution_gen,
+        n_ens=n_ens_gen)
+    rel_ent = ScoreEstimation.relative_entropy(true_samples, samples_nn; npoints=REL_ENT_POINTS)
+    kde_nn = kde(samples_nn)
+    x_min = min(minimum(true_samples), minimum(samples_nn))
+    x_max = max(maximum(true_samples), maximum(samples_nn))
+    x_grid = range(x_min, x_max; length=400)
+    score_true_vals = score_true_norm_scalar.(x_grid)
+    score_nn_vals = map(score_fn, x_grid)
+    iter_fig = Plots.plot(layout=(2, 1), size=(900, 700))
+    kde_emp = kde(vec(obs))
+    Plots.plot!(iter_fig, kde_true.x, kde_true.density;
+        label="reference pdf (analytic score)",
+        xlabel="x",
+        ylabel="density",
+        title="Score PDFs (preprocessing = true, clusters = $(nc))",
+        linewidth=2,
+        subplot=1,
+        legend=:topright)
+    Plots.plot!(iter_fig, kde_nn.x, kde_nn.density;
+        label="pdf (nn score)",
+        linewidth=2,
+        linestyle=:dash,
+        subplot=1)
+    Plots.plot!(iter_fig, kde_emp.x, kde_emp.density;
+        label="empirical pdf (obs)",
+        linewidth=2,
+        linestyle=:dot,
+        color=:gray,
+        subplot=1)
+    Plots.plot!(iter_fig, x_grid, score_true_vals;
+        label="analytic score",
+        xlabel="x",
+        ylabel="score",
+        title="Score Functions",
+        linewidth=2,
+        subplot=2,
+        legend=:topright)
+    Plots.plot!(iter_fig, x_grid, score_nn_vals;
+        label="nn score",
+        linewidth=2,
+        linestyle=:dash,
+        subplot=2)
+    display(iter_fig)
+    Plots.savefig(iter_fig, "figures/score_pdfs/pre_true_clusters_$(nc).png")
+    results_pre[i] = (clusters=nc, clusters_actual=nc_actual, prob=prob_used, train_time=t_train, relative_entropy=rel_ent, final_loss=losses[end])
+    GC.gc()
+    @info "preprocessing=true" clusters=nc train_time=t_train relative_entropy=rel_ent
 end
 
-function drift_nn!(du, u, t)
-    du[1] = score_nn_eval(u[1])
-    return nothing
-end
+# ---------------- Plotting ----------------
+train_times_no_pre = [r.train_time for r in results_no_pre]
+rel_ent_no_pre = [r.relative_entropy for r in results_no_pre]
+train_times_pre = [r.train_time for r in results_pre]
+rel_ent_pre = [r.relative_entropy for r in results_pre]
 
-function unit_diffusion!(du, u, t)
-    du[1] = 1.0
-    return nothing
-end
+plot_series = Plots.plot(train_times_no_pre, rel_ent_no_pre;
+    marker=:circle,
+    label="preprocessing = false",
+    xlabel="training time (s)",
+    ylabel="relative entropy",
+    title="Relative entropy vs training time",
+    legend=:topright)
+Plots.plot!(plot_series, train_times_pre, rel_ent_pre;
+    marker=:square,
+    label="preprocessing = true")
 
-traj_true = evolve([0.0], dt_gen, n_steps_gen, drift_true!, unit_diffusion!;
-                   timestepper=:euler, resolution=resolution_gen, sigma_inplace=true, n_ens=100)
-traj_nn = evolve([0.0], dt_gen, n_steps_gen, drift_nn!, unit_diffusion!;
-                 timestepper=:euler, resolution=resolution_gen, sigma_inplace=true, n_ens=100)
-
-kde_obs = kde(vec(obs))
-kde_true = kde(vec(traj_true))
-kde_nn = kde(vec(traj_nn))
-
-plt_pdf = Plots.plot(kde_obs.x, kde_obs.density;
-    label="Data",
-    color=:black,
-    xlabel="x (normalized)",
-    ylabel="PDF",
-    title="Stationary distributions")
-Plots.plot!(plt_pdf, kde_true.x, kde_true.density; label="Analytic Langevin", color=:red)
-Plots.plot!(plt_pdf, kde_nn.x, kde_nn.density; label="NN Langevin", color=:blue)
-
-plt_combined = Plots.plot(plt_score, plt_pdf; layout=(2, 1), size=(900, 900), legend=:topright)
+display(plot_series)
 mkpath("figures")
-Plots.savefig(plt_combined, "figures/reduced_score_pdf.png")
+Plots.savefig(plot_series, "figures/reduced_relative_entropy_vs_time.png")
 
-plt_losses = Plots.plot(plt_loss; size=(600, 400))
-Plots.savefig(plt_losses, "figures/reduced_training_loss.png")
-
-# ---------------- Makie summary figure ----------------
-mkpath("figures/GMM_figures")
+# ---------------- Persist results ----------------
 mkpath("data/GMM_data")
 
-segment_length = min(5000, size(obs, 2))
-time_obs = collect(range(0, length=segment_length, step=1)) .* dt
-obs_segment = Float64.(vec(obs[1, 1:segment_length]))
-
-time_nn = collect(range(0, length=segment_length, step=1)) .* dt_gen
-traj_nn_segment = Float64.(vec(traj_nn[1, 1:segment_length]))
-traj_true_segment = Float64.(vec(traj_true[1, 1:segment_length]))
-
-fig = Figure(resolution=(1200, 300), font="CMU Serif")
-
-# Define common elements
-colors = [:red, :blue]
-labels = ["True", "KGMM"]
-
-# Create subplots
-ax0 = GLMakie.Axis(fig[1,1], 
-    xlabel="t", ylabel="x",
-    title="Observations",
-    titlesize=20,
-    xlabelsize=16, ylabelsize=16)
-
-ax1 = GLMakie.Axis(fig[1,2], 
-    xlabel="x", ylabel="Score",
-    title="Scores",
-    titlesize=20,
-    xlabelsize=16, ylabelsize=16)
-
-ax2 = GLMakie.Axis(fig[1,3], 
-    xlabel="x", ylabel="PDF",
-    title="PDFs",
-    titlesize=20,
-    xlabelsize=16, ylabelsize=16)
-
-# Plot data
-n_obs = segment_length
-GLMakie.lines!(ax0, time_obs[1:10:n_obs], obs_segment[1:10:n_obs], color=:red, linewidth=1)
-GLMakie.lines!(ax0, time_nn[1:10:n_obs], traj_nn_segment[1:10:n_obs], color=:blue, linewidth=1)
-
-GLMakie.lines!(ax1, x_grid, score_true_grid, color=colors[1], linewidth=2)
-GLMakie.lines!(ax1, x_grid, score_nn_grid, color=colors[2], linewidth=2)
-GLMakie.xlims!(ax1, (-3, 6))
-GLMakie.ylims!(ax1, (-2, 7.8))
-
-GLMakie.lines!(ax2, kde_true.x, kde_true.density, color=colors[1], linewidth=2)
-GLMakie.lines!(ax2, kde_nn.x, kde_nn.density, color=colors[2], linewidth=2)
-GLMakie.xlims!(ax2, (-2.7, 7))
-#GLMakie.ylims!(ax2, (0, 0.5))
-
-# Add a more compact legend
-GLMakie.Legend(fig[1, :], 
-    [GLMakie.LineElement(color=c, linewidth=2) for c in colors],
-    labels,
-    orientation=:horizontal,
-    tellheight=false,
-    tellwidth=false,
-    halign=:right,
-    valign=:top,
-    margin=(10, 10, 10, 10))
-
-# Adjust spacing
-GLMakie.colgap!(fig.layout, 20)
-
-save("figures/GMM_figures/reduced.png", fig)
-
-# ---------------- Persist diagnostics ----------------
-centers_dataset = Float32.(centers_sorted)
-score_true_dataset = Float32.(score_true_centers)
-score_nn_dataset = Float32.(score_nn_centers)
-kgmm_scores_dataset = Float32.(kgmm_scores_sorted)
-train_losses_dataset = Float32.(train_losses)
-score_true_grid_ds = Float32.(score_true_grid)
-score_nn_grid_ds = Float32.(score_nn_grid)
-
-h5open("data/GMM_data/reduced.h5", "w") do file
-    write(file, "dt", dt)
-    write(file, "n_steps", n_steps)
-    write(file, "dt_gen", dt_gen)
-    write(file, "mean_obs", mean_obs)
-    write(file, "std_obs", std_obs)
-    write(file, "sigma", sigma_value)
-    write(file, "train_losses", train_losses_dataset)
-    write(file, "centers", centers_dataset)
-    write(file, "score_true_centers", score_true_dataset)
-    write(file, "score_nn_centers", score_nn_dataset)
-    write(file, "score_kgmm_centers", kgmm_scores_dataset)
-    write(file, "x_grid", Float32.(x_grid))
-    write(file, "score_true_grid", score_true_grid_ds)
-    write(file, "score_nn_grid", score_nn_grid_ds)
-    write(file, "kde_obs_x", Float32.(collect(kde_obs.x)))
-    write(file, "kde_obs_density", Float32.(kde_obs.density))
-    write(file, "kde_true_x", Float32.(collect(kde_true.x)))
-    write(file, "kde_true_density", Float32.(kde_true.density))
-    write(file, "kde_nn_x", Float32.(collect(kde_nn.x)))
-    write(file, "kde_nn_density", Float32.(kde_nn.density))
-    write(file, "obs_traj", Float32.(obs_segment))
-    write(file, "traj_true", Float32.(traj_true_segment))
-    write(file, "traj_nn", Float32.(traj_nn_segment))
+h5open("data/GMM_data/reduced_comparison.h5", "w") do file
+    write(file, "epochs_schedule", Float64.(epochs_schedule))
+    write(file, "clusters_schedule", Float64.(clusters_schedule))
+    write(file, "results_no_pre_time", Float64.(train_times_no_pre))
+    write(file, "results_no_pre_relent", Float64.(rel_ent_no_pre))
+    write(file, "results_pre_time", Float64.(train_times_pre))
+    write(file, "results_pre_relent", Float64.(rel_ent_pre))
+    write(file, "clusters_actual", Float64.([r.clusters_actual for r in results_pre]))
+    write(file, "probabilities", Float64.([r.prob for r in results_pre]))
+    write(file, "true_samples", Float32.(true_samples))
 end
 
-@info "Saved figures/reduced_score_pdf.png"
-@info "Saved figures/reduced_training_loss.png"
-@info "Saved figures/GMM_figures/reduced.png"
-@info "Saved data/GMM_data/reduced.h5"
+@info "Saved figures/reduced_relative_entropy_vs_time.png"
+@info "Saved data/GMM_data/reduced_comparison.h5"
 
-# ---------------- Test relative_entropy function ----------------
-@info "Testing relative_entropy function..."
+# ---------------- Human-readable summary ----------------
+println("\npreprocessing = false (epochs sweep):")
+for r in results_no_pre
+    println("  epochs = $(r.epochs): time = $(round(r.train_time; digits=3)) s, KL = $(round(r.relative_entropy; digits=4)), final loss = $(round(r.final_loss; digits=6))")
+end
 
-# Test 1D case: compare observed data with NN-generated and analytically-generated trajectories
-kl_obs_vs_nn = ScoreEstimation.relative_entropy(vec(obs), vec(traj_nn))
-kl_obs_vs_true = ScoreEstimation.relative_entropy(vec(obs), vec(traj_true))
-kl_true_vs_nn = ScoreEstimation.relative_entropy(vec(traj_true), vec(traj_nn))
-
-@info "1D Relative Entropy Results:"
-@info "  D_KL(obs || NN):    $kl_obs_vs_nn"
-@info "  D_KL(obs || True):  $kl_obs_vs_true"
-@info "  D_KL(True || NN):   $kl_true_vs_nn"
-
-# Test multi-dimensional case: create synthetic 2D data
-d = 2
-n_samples = 2000
-X1 = randn(d, n_samples)
-X2 = randn(d, n_samples) .+ [0.5, 0.3]  # Shifted distribution
-
-kl_vec = ScoreEstimation.relative_entropy(X1, X2)
-
-@info "Multi-dimensional (2D) Relative Entropy Results:"
-@info "  D_KL(X1 || X2) per dimension: $kl_vec"
+println("\npreprocessing = true (cluster sweep, epochs = $preprocessing_epochs):")
+for r in results_pre
+    println("  clusters = $(r.clusters) (actual $(r.clusters_actual), prob=$(round(r.prob; digits=5))): time = $(round(r.train_time; digits=3)) s, KL = $(round(r.relative_entropy; digits=4)), final loss = $(round(r.final_loss; digits=6))")
+end

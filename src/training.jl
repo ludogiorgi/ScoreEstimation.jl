@@ -8,7 +8,7 @@
 # - Vectorized data generation with Float32 tensors.
 # - Device-aware training loops (CPU/GPU) with on-device DataLoaders.
 # - Professional API with a high-level wrapper `train(...; preprocessing=...)`.
-# - Optional preprocessing uses KGMM outputs for supervised interpolation.
+# - Optional preprocessing uses kgmm outputs for supervised interpolation.
 
 
 ############################
@@ -284,7 +284,7 @@ end
 """
     train(obs_tuple, n_epochs, batch_size, neurons; kwargs...)
 
-Train on a precomputed dataset `(X, Z)` (e.g., from KGMM centers).
+Train on a precomputed dataset `(X, Z)` (e.g., from kgmm centers).
 
 Note: `neurons` contains only the hidden layer sizes. The first and last layer
 sizes are inferred from `size(X,1)`.
@@ -371,7 +371,7 @@ end
     train((X, Z, w), n_epochs, batch_size, neurons; ...)
 
 Train on a precomputed weighted dataset where `w` are per-sample weights
-(e.g., KGMM cluster counts). Uses weighted MSE.
+(e.g., kgmm cluster counts). Uses weighted MSE.
 
 Note: `neurons` contains only the hidden layer sizes. The first and last layer
 sizes are inferred from `size(X,1)`.
@@ -420,7 +420,7 @@ end
     train((X, Z, w), n_epochs, batch_size, nn::Chain; ...)
 
 Continue training an existing ε-network on a precomputed weighted dataset
-where `w` are per-sample weights (e.g., KGMM cluster counts). Uses weighted MSE.
+where `w` are per-sample weights (e.g., kgmm cluster counts). Uses weighted MSE.
 """
 function train(obs_tuple::Tuple{<:AbstractMatrix,<:AbstractMatrix,<:AbstractVector},
                n_epochs::Integer,
@@ -477,13 +477,13 @@ end
 
 
 ############################
-#  KGMM integration        #
+#  kgmm integration        #
 ############################
 
 """
     _dataset_from_kgmm(res::NamedTuple, σ::Real)
 
-Build a supervised (X, Z) dataset from KGMM result `res`.
+Build a supervised (X, Z) dataset from kgmm result `res`.
 Using s(x) = -(1/σ) E[z|x] ⇒ E[z|x] = -σ s(x), so set targets Z = -σ·s.
 """
 function _dataset_from_kgmm(res::NamedTuple, σ::Real)
@@ -500,9 +500,9 @@ end
 
 High-level wrapper:
 - preprocessing=false: ε-training from random draws X=Y+σ·ε.
-- preprocessing=true : run KGMM(σ, obs; kgmm_kwargs...) and supervise on centroids.
+- preprocessing=true : run kgmm(σ, obs; kgmm_kwargs...) and supervise on centroids.
 Returns `(nn, train_losses, val_losses, div_fn, kgmm)`; `val_losses` is empty in this wrapper.
-`kgmm` is the output of KGMM(σ, obs; ...) when `preprocessing=true`, otherwise `nothing`.
+`kgmm` is the output of kgmm(σ, obs; ...) when `preprocessing=true`, otherwise `nothing`.
 """
 function train(obs::AbstractMatrix; preprocessing::Bool=false,
                σ::Real=0.1,
@@ -553,15 +553,15 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
         end
         return nn, losses, Float32[], div_fn, jac_fn, nothing
     else
-        # Compute KGMM via the project module; expects `ScoreEstimation` to be in scope.
-        res = ScoreEstimation.KGMM(σ, obs; kgmm_kwargs...)
+        # Compute kgmm via the project module; expects `ScoreEstimation` to be in scope.
+        res = ScoreEstimation.kgmm(σ, obs; kgmm_kwargs...)
         X, Z = _dataset_from_kgmm(res, σ)
         w    = Float32.(res.counts)
         if nn === nothing
             nn, losses = train((X, Z, w), n_epochs, batch_size, neurons; opt=opt, use_gpu=use_gpu, verbose=verbose)
         else
             if verbose && !isempty(neurons)
-                println("Existing nn provided; ignoring neurons and continuing training on KGMM dataset.")
+                println("Existing nn provided; ignoring neurons and continuing training on kgmm dataset.")
             end
             nn, losses = train((X, Z, w), n_epochs, batch_size, nn; opt=opt, use_gpu=use_gpu, verbose=verbose)
         end
