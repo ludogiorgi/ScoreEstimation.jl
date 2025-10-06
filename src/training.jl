@@ -117,7 +117,7 @@ Train a new ε-network (predicts z) with fixed σ.
 Note: `neurons` contains only the hidden layer sizes. The input and output
 layer sizes are automatically inferred as the system dimension `D = size(obs,1)`.
 """
-function train(obs, n_epochs, batch_size, neurons::Vector{Int}, σ::Real; 
+function train(obs, n_epochs, batch_size, neurons::Vector{Int}, σ::Real;
                opt=Flux.Adam(0.001), activation=_swish, last_activation=identity,
                use_gpu=true, verbose=false)
 
@@ -152,7 +152,7 @@ function train(obs, n_epochs, batch_size, neurons::Vector{Int}, σ::Real;
     end
     verbose && finish!(p)
 
-    return nn, losses
+    return nn, losses, opt_state
 end
 
 ############################
@@ -246,9 +246,15 @@ end
     train(obs, n_epochs, batch_size, nn::Chain, σ::Real; kwargs...)
 
 Continue training an existing ε-network with fixed σ.
+
+# Keyword Arguments
+- `opt_state=nothing`: Existing optimizer state to continue from. If `nothing`, creates new state.
+
+# Returns
+- `(nn, losses, opt_state)`: Trained network, loss history, and optimizer state.
 """
-function train(obs, n_epochs, batch_size, nn::Chain, σ::Real; 
-               opt=Flux.Adam(0.001), use_gpu=true, verbose=false)
+function train(obs, n_epochs, batch_size, nn::Chain, σ::Real;
+               opt=Flux.Adam(0.001), use_gpu=true, verbose=false, opt_state=nothing)
 
     device = (use_gpu && CUDA.functional()) ? gpu : cpu
     if verbose
@@ -256,7 +262,12 @@ function train(obs, n_epochs, batch_size, nn::Chain, σ::Real;
     end
 
     nn = nn |> device |> Flux.f32
-    opt_state = Flux.setup(opt, nn)
+
+    # Use existing optimizer state if provided, otherwise create new
+    if opt_state === nothing
+        opt_state = Flux.setup(opt, nn)
+    end
+
     losses = Float32[]
 
     obsf = Float32.(obs)
@@ -278,7 +289,7 @@ function train(obs, n_epochs, batch_size, nn::Chain, σ::Real;
         verbose && next!(p)
     end
     verbose && finish!(p)
-    return nn, losses
+    return nn, losses, opt_state
 end
 
 """
@@ -517,19 +528,20 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
                probes::Integer=1,
                rademacher::Bool=true,
                jacobian::Bool=false,
-               nn::Union{Flux.Chain,Nothing}=nothing)
+               nn::Union{Flux.Chain,Nothing}=nothing,
+               opt_state=nothing)
 
     opt = Flux.Adam(Float32(lr))
     device = (use_gpu && CUDA.functional()) ? gpu : cpu
 
     if !preprocessing
         if nn === nothing
-            nn, losses = train(obs, n_epochs, batch_size, neurons, σ; opt=opt, use_gpu=use_gpu, verbose=verbose)
+            nn, losses, opt_state = train(obs, n_epochs, batch_size, neurons, σ; opt=opt, use_gpu=use_gpu, verbose=verbose)
         else
             if verbose && !isempty(neurons)
                 println("Existing nn provided; ignoring neurons and continuing training.")
             end
-            nn, losses = train(obs, n_epochs, batch_size, nn, σ; opt=opt, use_gpu=use_gpu, verbose=verbose)
+            nn, losses, opt_state = train(obs, n_epochs, batch_size, nn, σ; opt=opt, use_gpu=use_gpu, verbose=verbose, opt_state=opt_state)
         end
         div_fn = if divergence
             let nn=nn, device=device, probes=probes, rademacher=rademacher, σ=σ
@@ -551,7 +563,7 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
         else
             X -> zeros(eltype(X), size(X,1), size(X,1), size(X,2))
         end
-        return nn, losses, Float32[], div_fn, jac_fn, nothing
+        return nn, losses, Float32[], div_fn, jac_fn, nothing, opt_state
     else
         # Compute kgmm via the project module; expects `ScoreEstimation` to be in scope.
         res = ScoreEstimation.kgmm(σ, obs; kgmm_kwargs...)
@@ -585,6 +597,6 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
         else
             Xq -> zeros(eltype(Xq), size(Xq,1), size(Xq,1), size(Xq,2))
         end
-        return nn, losses, Float32[], div_fn, jac_fn, res
+        return nn, losses, Float32[], div_fn, jac_fn, res, nothing
     end
 end

@@ -1,213 +1,469 @@
-# using Pkg
-# Pkg.activate(".")
-# Pkg.rm("FastSDE")                  # run once if already present
-# Pkg.add(url="https://github.com/ludogiorgi/FastSDE.git", rev="main")  # or a commit SHA
-# Pkg.status("FastSDE")
-# ##
 using Pkg
 Pkg.activate(".")
 Pkg.instantiate()
 
-using Revise
 using ScoreEstimation
-using Plots
-using LinearAlgebra
-using Statistics
-using Flux
 using FastSDE
 using Statistics
+using Plots
+using Flux
+using HDF5
+using Random
+using KernelDensity
 
-# ---------------- Problem setup ----------------
+# ---------------- Reduced one-dimensional model ----------------
+const reduced_params = (
+    L11 = -2.0,
+    L12 = 0.2,
+    L13 = 0.1,
+    g2  = 0.6,
+    g3  = 0.4,
+    s2  = 1.2,
+    s3  = 0.8,
+    I   = 1.0,
+    eps = 0.1,
+)
 
-const params = (a=-0.0222, b=-0.2, c=0.0494, F_tilde=0.6, s=0.7071)
+function reduced_coefficients(p)
+    a = p.L11 + p.eps * ((p.I^2 * p.s2^2) / (2 * p.g2^2) - (p.L12^2) / p.g2 - (p.L13^2) / p.g3)
+    b = -2 * (p.L12 * p.I) / p.g2 * p.eps
+    c = (p.I^2) / p.g2 * p.eps
+    B = -(p.I * p.s2) / p.g2 * sqrt(p.eps)
+    A = -(p.L12 * B) / p.I
+    F_tilde = (A * B) / 2
+    s = (p.L13 * p.s3) / p.g3 * sqrt(p.eps)
+    return (a=a, b=b, c=c, A=A, B=B, F_tilde=F_tilde, s=s)
+end
+
+const coeffs = reduced_coefficients(reduced_params)
+
+function drift_reduced!(du, u, t)
+    du[1] = -coeffs.F_tilde + coeffs.a * u[1] + coeffs.b * u[1]^2 - coeffs.c * u[1]^3
+    return nothing
+end
+
+function diffusion_reduced!(du, u, t)
+    du[1] = sqrt((coeffs.A - coeffs.B * u[1])^2 + coeffs.s^2)
+    return nothing
+end
+
+"""
+    score_true_physical(x)
+
+Analytic score s(x) = ∂x log p(x) for the 1D SDE
+    dX = f(X) dt + g(X) dW,
+with
+    f(x) = -F̃ + a x + b x^2 - c x^3,
+    g(x)^2 = ((A - B x)^2 + s^2).
+
+Zero-flux stationary solution satisfies: f p - (1/2)∂x(g^2 p) = 0 ⇒
+    s(x) = ∂x log p(x) = (2 f(x) - ∂x g(x)^2) / g(x)^2.
+
+Here ∂x g^2 = -B (A - B x), so
+    s(x) = (2 f(x) + 2 B (A - B x)) / ( ((A - B x)^2 + s^2) )
+         = 2 (f(x) + B (A - B x)) / ((A - B x)^2 + s^2).
+"""
+function score_true_physical(x::Real)
+    f = -coeffs.F_tilde + coeffs.a * x + coeffs.b * x^2 - coeffs.c * x^3
+    g2 = (coeffs.A - coeffs.B * x)^2 + coeffs.s^2
+    dg2 = -2*coeffs.B * (coeffs.A - coeffs.B * x)
+    return (2*f - dg2) / g2
+end
+
+score_true_normalized(x::Real, mean_obs::Real, std_obs::Real) =
+    std_obs * score_true_physical(x * std_obs + mean_obs)
+
+# ---------------- Data generation ----------------
+Random.seed!(1234)
 
 dim = 1
 dt = 0.01
-Nsteps = 10_000
-u0 = [0.0]
-resolution = 5
+n_steps = 50_000
+resolution = 100
+initial_state = zeros(dim)
 
-function drift!(du, u, t)
-    du[1] = params.F_tilde + params.a*u[1] + params.b*u[1]^2 - params.c*u[1]^3
+obs_nn = evolve(initial_state, dt, n_steps, drift_reduced!, diffusion_reduced!;
+                n_burnin=1000, timestepper=:euler, resolution=resolution, sigma_inplace=true, n_ens=100, boundary=(-10,10))
+
+@info "Trajectory shape" size(obs_nn)
+
+mean_obs = mean(obs_nn)
+std_obs = std(obs_nn)
+obs = (obs_nn .- mean_obs) ./ std_obs
+obs_uncorr = obs
+
+score_true_norm_scalar(x::Real) = score_true_normalized(x, mean_obs, std_obs)
+# ---------------- Langevin utilities ----------------
+"""
+    generate_langevin_samples(score_scalar_fn; dt, n_steps, resolution, n_ens, boundary=(-5,5), nn=nothing, sigma=nothing)
+
+Sample using FastSDE.evolve with drift = score and diffusion = sqrt(2) (normalized space).
+If `nn` and `sigma` are provided, uses batched drift for faster ensemble integration with neural networks.
+"""
+function generate_langevin_samples(score_scalar_fn; dt, n_steps, resolution, n_ens, boundary=(-10,10), nn=nothing, sigma=nothing)
+    # Decide if we should use batched mode (only makes sense if an NN is provided AND n_ens > 1)
+    use_batched = !isnothing(nn) && !isnothing(sigma)
+    if use_batched && n_ens == 1
+        # Single ensemble member gives no batching benefit; also avoids arity issues.
+        use_batched = false
+    end
+
+    if use_batched
+        # Batched drift for neural network
+        drift_batched! = create_batched_drift_nn(nn, sigma)
+
+        # For batched mode, pass sigma as a scalar Number (FastSDE batched path requirement)
+        sigma_constant = sqrt(2.0)
+        samples = evolve([0.0], dt, n_steps, drift_batched!, sigma_constant;
+                          timestepper=:euler,
+                          resolution=resolution,
+                          n_burnin=1000,
+                          n_ens=n_ens,
+                          boundary=boundary,
+                          batched_drift=true,
+                          manage_blas_threads=true)
+    else
+        # Non-batched mode for scalar functions
+        function drift!(du, u, t)
+            du[1] = score_scalar_fn(u[1])
+            return nothing
+        end
+        function unit_diffusion!(du, u, t)
+            du[1] = sqrt(2.0)
+            return nothing
+        end
+        samples = evolve([0.0], dt, n_steps, drift!, unit_diffusion!;
+                         timestepper=:euler,
+                         resolution=resolution,
+                         n_burnin=1000,
+                         sigma_inplace=true,
+                         n_ens=n_ens,
+                         boundary=boundary,
+                         batched_drift=false,
+                         manage_blas_threads=false)
+    end
+    return vec(samples)
 end
 
-function sigma!(du, u, t)
-    du[1] = params.s
+Random.seed!(42)
+dt_gen = 0.005
+n_steps_gen = 100_000
+resolution_gen = 200
+n_ens_gen = 100  # increased for more stable KL estimates
+
+# Generate from the original SDE in physical space
+true_samples = generate_langevin_samples(score_true_norm_scalar;
+    dt=dt_gen,
+    n_steps=n_steps_gen,
+    resolution=resolution_gen,
+    n_ens=n_ens_gen,
+    boundary=(-10, 10))
+
+kde_true = kde(true_samples)
+
+const REL_ENT_POINTS = 2048
+
+# ---------------- Helpers ----------------
+function score_from_nn_scalar(nn, sigma)
+    buf = zeros(Float32, 1, 1)
+    function inner(x::Real)
+        buf[1] = Float32(x)
+        y = nn(buf)
+        return -Float64(y[1]) / Float64(sigma)
+    end
+    return inner
 end
 
-obs_nn = evolve(u0, dt, Nsteps, drift!, sigma!;
-                timestepper=:euler, resolution=resolution,
-                sigma_inplace=true, n_ens=100)
-
-println("FastSDE trajectory shape: ", size(obs_nn))
-
-# ---------------- Normalization ----------------
-
-M = mean(obs_nn, dims=2)
-S = std(obs_nn, dims=2)
-obs = (obs_nn .- M) ./ S
-obs_uncorr = obs[:, :]
-
-# ---------------- Ground-truth (steady-state convention) ----------------
-
-# Score for 1D stationary SDE dX = f(X) dt + s dW:
-# s(x) = ∂x log p(x) = 2 f(x) / s^2 (zero-flux stationary solution)
-function score_true(x, p=params)
-    u = x[1]
-    f = p.F_tilde + p.a*u + p.b*u^2 - p.c*u^3
-    return [2 * f / (p.s^2)]
+# Batched drift function for neural network score
+function create_batched_drift_nn(nn, sigma)
+    # Primary 4-arg method (DU,U,p,t)
+    function drift_batched!(DU, U, p, t)
+        U_f32 = Float32.(U)          # U: (1, n_ens)
+        Y = nn(U_f32)                # same shape
+        DU .= -Float64.(Y) ./ Float64(sigma)
+        return nothing
+    end
+    # 3-arg fallback used by static path probes (DU,U,t)
+    function drift_batched!(DU, U, t)
+        drift_batched!(DU, U, nothing, t)
+        return nothing
+    end
+    return drift_batched!
 end
 
-# Divergence in 1D is derivative of the score: s'(x) = 2 f'(x) / s^2
-function divergence_true(x, p=params)
-    u = x[1]
-    fp = p.a + 2*p.b*u - 3*p.c*u^2
-    return [2 * fp / (p.s^2)]
+function train_without_preprocessing(obs, epochs; sigma, neurons, batch_size, lr, seed,
+                                     nn_prev=nothing, cumulative_time=0.0, opt_state_prev=nothing)
+    Random.seed!(seed)
+    nn = nothing; losses = nothing; opt_state = nothing
+    elapsed = @elapsed begin
+        nn, losses, _, _, _, _, opt_state = ScoreEstimation.train(
+            obs;
+            preprocessing=false,
+            σ=sigma,
+            neurons=neurons,
+            n_epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            use_gpu=false,
+            verbose=false,
+            divergence=false,
+            nn=nn_prev,
+            opt_state=opt_state_prev,
+        )
+    end
+    return nn, losses, cumulative_time + elapsed, opt_state
 end
 
-# Normalization helpers (map normalized coordinate ξ to physical x = ξ*S + M)
-# Score transforms as s_norm(ξ) = S * s(x)
-function normalize_f(f, x, M, S, p=params)
-    return (f(x .* S .+ M, p) .* S)[:]
+function train_with_preprocessing(obs, epochs, prob;
+        sigma, neurons, batch_size, lr, seed,
+        conv_param=1e-4, i_max=120, show_progress=false)
+    Random.seed!(seed)
+    kgmm_kwargs = (prob=prob, conv_param=conv_param, i_max=i_max, show_progress=show_progress)
+    nn = nothing; losses = nothing; res = nothing
+    elapsed = @elapsed begin
+        nn, losses, _, _, _, res = ScoreEstimation.train(
+            obs;
+            preprocessing=true,
+            σ=sigma,
+            neurons=neurons,
+            n_epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            use_gpu=false,
+            verbose=false,
+            kgmm_kwargs=kgmm_kwargs,
+            divergence=false,
+        )
+    end
+    return nn, losses, elapsed, res.Nc, prob
 end
 
-# Divergence transforms in 1D as div_norm(ξ) = S^2 * div(x)
-function normalize_divergence(fdiv, x, M, S, p=params)
-    return (fdiv(x .* S .+ M, p) .* (S .^ 2))[:]
+# ---------------- Experiment configuration ----------------
+sigma_value = 0.05
+neurons = [100, 50]
+batch_size = 16
+lr = 1e-3
+
+epochs_schedule = [10:10:60...]
+prob_schedule = [0.01:-0.002:0.002...]
+preprocessing_epochs = 1000
+
+Plots.gr()
+
+mkpath("figures/score_pdfs")
+
+# Warm-up runs to remove compilation bias from first measurements
+@info "Warm-up (preprocessing=false)"
+train_without_preprocessing(obs_uncorr, 1;
+    sigma=sigma_value,
+    neurons=neurons,
+    batch_size=batch_size,
+    lr=lr,
+    seed=9999)
+
+@info "Warm-up (preprocessing=true)"
+train_with_preprocessing(obs_uncorr, 1, prob_schedule[1];
+    sigma=sigma_value,
+    neurons=neurons,
+    batch_size=batch_size,
+    lr=lr,
+    seed=19_999)
+
+# ---------------- Sweeps ----------------
+# Result containers (dynamic). We use concrete NamedTuple types so downstream
+# comprehensions produce concretely typed arrays (avoids Vector{Any} and HDF5 write errors).
+const NoPreResult = NamedTuple{(:epochs,:train_time,:relative_entropy,:final_loss),Tuple{Int,Float64,Float64,Float64}}
+const PreResult   = NamedTuple{(:clusters,:clusters_actual,:prob,:train_time,:relative_entropy,:final_loss),Tuple{Int,Int,Float64,Float64,Float64,Float64}}
+results_no_pre = NoPreResult[]
+results_pre    = PreResult[]
+
+
+prev_nn = nothing
+prev_opt_state = nothing
+cumulative_time_no_pre = 0.0
+for (i, epochs) in enumerate(epochs_schedule)
+    global prev_nn, prev_opt_state, cumulative_time_no_pre
+    seed = 10_000 + i # fixed seed for consistent incremental training
+    prev_nn, losses, cumulative_time_no_pre, prev_opt_state = train_without_preprocessing(obs_uncorr, epochs;
+        sigma=sigma_value,
+        neurons=neurons,
+        batch_size=batch_size,
+        lr=lr,
+        seed=seed,
+        nn_prev=prev_nn,
+        cumulative_time=cumulative_time_no_pre,
+        opt_state_prev=prev_opt_state)
+    nn = prev_nn
+    t_train = cumulative_time_no_pre
+    score_fn = score_from_nn_scalar(nn, sigma_value)
+    Random.seed!(111_111)
+    samples_nn = generate_langevin_samples(score_fn;
+        dt=dt_gen,
+        n_steps=n_steps_gen,
+        resolution=resolution_gen,
+        n_ens=n_ens_gen,
+        nn=nn,
+        sigma=sigma_value)
+    rel_ent = ScoreEstimation.relative_entropy(true_samples, samples_nn; npoints=REL_ENT_POINTS)
+    kde_nn = kde(samples_nn)
+    x_min = min(minimum(true_samples), minimum(samples_nn))
+    x_max = max(maximum(true_samples), maximum(samples_nn))
+    x_grid = range(x_min, x_max; length=400)
+    score_true_vals = score_true_norm_scalar.(x_grid)
+    score_nn_vals = map(score_fn, x_grid)
+    iter_fig = Plots.plot(layout=(2, 1), size=(900, 700))
+    # empirical KDE from normalized observations
+    kde_emp = kde(vec(obs))
+    Plots.plot!(iter_fig, kde_true.x, kde_true.density;
+        label="reference pdf (analytic score)",
+        xlabel="x",
+        ylabel="density",
+        title="Score PDFs (preprocessing = false, epochs = $(epochs))",
+        linewidth=2,
+        subplot=1,
+        legend=:topright)
+    Plots.plot!(iter_fig, kde_nn.x, kde_nn.density;
+        label="pdf (nn score)",
+        linewidth=2,
+        linestyle=:dash,
+        subplot=1)
+    Plots.plot!(iter_fig, kde_emp.x, kde_emp.density;
+        label="empirical pdf (obs)",
+        linewidth=2,
+        linestyle=:dot,
+        color=:gray,
+        subplot=1)
+    Plots.plot!(iter_fig, x_grid, score_true_vals;
+        label="analytic score",
+        xlabel="x",
+        ylabel="score",
+        title="Score Functions",
+        linewidth=2,
+        subplot=2,
+        legend=:topright)
+    Plots.plot!(iter_fig, x_grid, score_nn_vals;
+        label="nn score",
+        linewidth=2,
+        linestyle=:dash,
+        subplot=2)
+    display(iter_fig)
+    Plots.savefig(iter_fig, "figures/score_pdfs/pre_false_epochs_$(epochs).png")
+    push!(results_no_pre, (epochs=epochs, train_time=t_train, relative_entropy=rel_ent, final_loss=losses[end]))
+    GC.gc()
+    @info "preprocessing=false" epochs=epochs train_time=t_train relative_entropy=rel_ent
 end
 
-score_true_norm(x, p=params)       = normalize_f(score_true, x, M, S, p)
-divergence_true_norm(x, p=params)  = normalize_divergence(divergence_true, x, M, S, p)
+for (i, prob) in enumerate(prob_schedule)
+    seed = 20_000 + i
+    nn, losses, t_train, nc_actual, prob_used = train_with_preprocessing(obs_uncorr, preprocessing_epochs, prob;
+        sigma=sigma_value,
+        neurons=neurons,
+        batch_size=batch_size,
+        lr=lr,
+        seed=seed)
+    score_fn = score_from_nn_scalar(nn, sigma_value)
+    Random.seed!(111_111)
+    samples_nn = generate_langevin_samples(score_fn;
+        dt=dt_gen,
+        n_steps=n_steps_gen,
+        resolution=resolution_gen,
+        n_ens=n_ens_gen,
+        nn=nn,
+        sigma=sigma_value)
+    rel_ent = ScoreEstimation.relative_entropy(true_samples, samples_nn; npoints=REL_ENT_POINTS)
+    kde_nn = kde(samples_nn)
+    x_min = min(minimum(true_samples), minimum(samples_nn))
+    x_max = max(maximum(true_samples), maximum(samples_nn))
+    x_grid = range(x_min, x_max; length=400)
+    score_true_vals = score_true_norm_scalar.(x_grid)
+    score_nn_vals = map(score_fn, x_grid)
+    iter_fig = Plots.plot(layout=(2, 1), size=(900, 700))
+    kde_emp = kde(vec(obs))
+    Plots.plot!(iter_fig, kde_true.x, kde_true.density;
+        label="reference pdf (analytic score)",
+        xlabel="x",
+        ylabel="density",
+        title="Score PDFs (preprocessing = true, # clusters = $(nc_actual))",
+        linewidth=2,
+        subplot=1,
+        legend=:topright)
+    Plots.plot!(iter_fig, kde_nn.x, kde_nn.density;
+        label="pdf (nn score)",
+        linewidth=2,
+        linestyle=:dash,
+        subplot=1)
+    Plots.plot!(iter_fig, kde_emp.x, kde_emp.density;
+        label="empirical pdf (obs)",
+        linewidth=2,
+        linestyle=:dot,
+        color=:gray,
+        subplot=1)
+    Plots.plot!(iter_fig, x_grid, score_true_vals;
+        label="analytic score",
+        xlabel="x",
+        ylabel="score",
+        title="Score Functions",
+        linewidth=2,
+        subplot=2,
+        legend=:topright)
+    Plots.plot!(iter_fig, x_grid, score_nn_vals;
+        label="nn score",
+        linewidth=2,
+        linestyle=:dash,
+        subplot=2)
+    display(iter_fig)
+    Plots.savefig(iter_fig, "figures/score_pdfs/pre_true_clusters_$(nc_actual).png")
+    push!(results_pre, (clusters=nc_actual, clusters_actual=nc_actual, prob=prob_used, train_time=t_train, relative_entropy=rel_ent, final_loss=losses[end]))
+    GC.gc()
+    @info "preprocessing=true" clusters=nc_actual train_time=t_train relative_entropy=rel_ent
+end
 
-# Diffusion noise (scalar)
-σ_value = 0.05
+# ---------------- Plotting ----------------
+train_times_no_pre = [r.train_time for r in results_no_pre]
+rel_ent_no_pre = [r.relative_entropy for r in results_no_pre]
+train_times_pre = [r.train_time for r in results_pre]
+rel_ent_pre = [r.relative_entropy for r in results_pre]
 
-############## Train NN (DSM) and get divergence via Hutchinson ##############
+plot_series = Plots.plot(train_times_no_pre, rel_ent_no_pre;
+    marker=:circle,
+    label="preprocessing = false",
+    xlabel="training time (s)",
+    ylabel="relative entropy",
+    title="Relative entropy vs training time",
+    legend=:topright)
+Plots.plot!(plot_series, train_times_pre, rel_ent_pre;
+    marker=:square,
+    label="preprocessing = true")
 
-neurons = [100, 50]  # hidden layers only; input/output inferred from data dim
+display(plot_series)
+mkpath("figures")
+Plots.savefig(plot_series, "figures/reduced_relative_entropy_vs_time.png")
 
-# Train ε-net on-the-fly draws; ask wrapper for divergence and return KGMM when preprocessing=true
-@time nn, train_losses, _, div_fn, res_wrapped = ScoreEstimation.train(
-    obs_uncorr;
-    preprocessing = true,           # use KGMM preprocessing
-    σ             = σ_value,
-    kgmm_kwargs   = (prob=0.002, conv_param=1e-4, show_progress=false),
-    n_epochs      = 2000,
-    batch_size    = 16,
-    lr            = 1e-3,
-    neurons       = neurons,
-    divergence    = true,
-    probes        = 1,
-    use_gpu       = false,
-    verbose       = true,
-)
+# ---------------- Persist results ----------------
+mkpath("data/GMM_data")
 
-# score from ε-net: sθ(x) = -ε̂(x)/σ
-sθ = X -> -Array(nn(Float32.(X))) ./ Float32(σ_value)
+h5open("data/GMM_data/reduced_comparison.h5", "w") do file
+    write(file, "epochs_schedule", Float64.(epochs_schedule))
+    write(file, "prob_schedule", Float64.(prob_schedule))
+    write(file, "results_no_pre_time", Float64.(train_times_no_pre))
+    write(file, "results_no_pre_relent", Float64.(rel_ent_no_pre))
+    write(file, "results_pre_time", Float64.(train_times_pre))
+    write(file, "results_pre_relent", Float64.(rel_ent_pre))
+    write(file, "clusters_actual", Float64.([r.clusters_actual for r in results_pre]))
+    write(file, "probabilities", Float64.([r.prob for r in results_pre]))
+    write(file, "true_samples", Float32.(true_samples))
+end
 
-# Use KGMM output returned by the training wrapper
-centers = res_wrapped.centers
-scores  = res_wrapped.score
-divs    = res_wrapped.divergence
+@info "Saved figures/reduced_relative_entropy_vs_time.png"
+@info "Saved data/GMM_data/reduced_comparison.h5"
 
-# Prepare data for plotting (sorted by x)
-centers_sorted_indices = sortperm(centers[1, :])
-centers_sorted = centers[:, centers_sorted_indices][:]
-scores_sorted = scores[:, centers_sorted_indices][:]
-divs_sorted = divs[centers_sorted_indices]
+# ---------------- Human-readable summary ----------------
+println("\npreprocessing = false (epochs sweep):")
+for r in results_no_pre
+    println("  epochs = $(r.epochs): time = $(round(r.train_time; digits=3)) s, KL = $(round(r.relative_entropy; digits=4)), final loss = $(round(r.final_loss; digits=6))")
+end
 
-# Ground-truth values at the same (normalized) centers
-scores_true = [score_true_norm(centers_sorted[i], params)[1] for i in eachindex(centers_sorted)]
-divs_true   = [divergence_true_norm(centers_sorted[i], params)[1] for i in eachindex(centers_sorted)]
-
-# Predict at KGMM centers
-Yscore_hat = sθ(centers)                     # (D, C)
-Ydiv_hat   = div_fn(centers)                 # (1, C)
-
-score_nn_sorted  = vec(Yscore_hat)[centers_sorted_indices]
-div_nn_sorted    = vec(Ydiv_hat)[centers_sorted_indices]
-
-# Plots
-plt1 = Plots.plot(centers_sorted, score_nn_sorted;
-                     color=:blue, lw=2, label="NN (score)",
-                     xlabel="x (normalized)", ylabel="score",
-                     title="Score: NN vs Analytic & KGMM")
-Plots.plot!(plt1, centers_sorted, scores_true; color=:red, lw=2, label="Analytic score")
-Plots.scatter!(plt1, centers_sorted, scores_sorted; color=:green, ms=3, msw=0, label="KGMM score (centers)")
-
-plt2 = Plots.plot(centers_sorted, div_nn_sorted;
-                     color=:blue, lw=2, label="NN (divergence)",
-                     xlabel="x (normalized)", ylabel="divergence",
-                     title="Divergence: NN vs Analytic & KGMM", ylims=(-4, 4))
-Plots.plot!(plt2, centers_sorted, divs_true; color=:red, lw=2, label="Analytic divergence")
-Plots.scatter!(plt2, centers_sorted, divs_sorted; color=:green, ms=3, msw=0, label="KGMM divergence (centers)")
-
-finalfig = Plots.plot(plt1, plt2; layout=(2, 1), size=(900, 900), legend=:topright)
-display(finalfig)
-savefig(finalfig, "figures/nn_vs_truth.png")
-
-# ---------------- RMSE diagnostics ----------------
-rmse(a, b) = sqrt(mean((Float64.(a) .- Float64.(b)).^2))
-
-score_true_v  = Float64.(scores_true)
-score_nn_v    = Float64.(score_nn_sorted)
-score_kgmm_v  = Float64.(vec(scores_sorted))
-
-div_true_v    = Float64.(divs_true)
-div_nn_v      = Float64.(div_nn_sorted)
-div_kgmm_v    = Float64.(divs_sorted)
-
-rmse_s_nn_true   = rmse(score_nn_v,   score_true_v)
-rmse_s_kg_true   = rmse(score_kgmm_v, score_true_v)
-rmse_s_nn_kg     = rmse(score_nn_v,   score_kgmm_v)
-
-rmse_d_nn_true   = rmse(div_nn_v,   div_true_v)
-rmse_d_kg_true   = rmse(div_kgmm_v, div_true_v)
-rmse_d_nn_kg     = rmse(div_nn_v,   div_kgmm_v)
-
-@info "RMSE (score):  NN vs True = $(rmse_s_nn_true),  KGMM vs True = $(rmse_s_kg_true),  NN vs KGMM = $(rmse_s_nn_kg)"
-@info "RMSE (divergence):  NN vs True = $(rmse_d_nn_true),  KGMM vs True = $(rmse_d_kg_true),  NN vs KGMM = $(rmse_d_nn_kg)"
-
-##############################
-#  Compare: NN vs NN+KGMM    #
-##############################
-
-# Train a second network WITHOUT preprocessing (raw DSM), keeping same σ and architecture
-@time nn_raw, train_losses_raw, _, div_fn_raw, _ = ScoreEstimation.train(
-    obs_uncorr;
-    preprocessing = false,
-    σ             = σ_value,
-    n_epochs      = 20,
-    batch_size    = 16,
-    lr            = 1e-3,
-    neurons       = neurons,
-    divergence    = true,
-    probes        = 1,
-    use_gpu       = false,
-    verbose       = true,
-)
-
-# Score from raw ε-net: sθ(x) = -ε̂(x)/σ
-sθ_raw = X -> -Array(nn_raw(Float32.(X))) ./ Float32(σ_value)
-
-# Evaluate both NN variants at KGMM centers
-Yscore_hat_raw = sθ_raw(centers)
-Ydiv_hat_raw   = div_fn_raw(centers)
-
-score_nn_raw_sorted = vec(Yscore_hat_raw)[centers_sorted_indices]
-div_nn_raw_sorted   = vec(Ydiv_hat_raw)[centers_sorted_indices]
-
-# Figures: analytic vs NN+KGMM vs NN (raw DSM)
-plt1c = Plots.plot(centers_sorted, scores_true; color=:red, lw=2, label="Analytic score",
-                   xlabel="x (normalized)", ylabel="score", title="Score: Analytic vs NN + KGMM vs NN")
-Plots.plot!(plt1c, centers_sorted, score_nn_sorted; color=:blue, lw=2, label="NN + KGMM")
-Plots.plot!(plt1c, centers_sorted, score_nn_raw_sorted; color=:purple, lw=2, label="NN (DSM)")
-
-plt2c = Plots.plot(centers_sorted, divs_true; color=:red, lw=2, label="Analytic divergence",
-                   xlabel="x (normalized)", ylabel="divergence", title="Divergence: Analytic vs NN + KGMM vs NN")
-Plots.plot!(plt2c, centers_sorted, div_nn_sorted; color=:blue, lw=2, label="NN + KGMM")
-Plots.plot!(plt2c, centers_sorted, div_nn_raw_sorted; color=:purple, lw=2, label="NN (DSM)")
-
-finalfig2 = Plots.plot(plt1c, plt2c; layout=(2, 1), size=(900, 900), legend=:topright)
-display(finalfig2)
-savefig(finalfig2, "figures/nn_compare.png")
+println("\npreprocessing = true (cluster sweep, epochs = $preprocessing_epochs):")
+for r in results_pre
+    println("  clusters = $(r.clusters) (actual $(r.clusters_actual), prob=$(round(r.prob; digits=5))): time = $(round(r.train_time; digits=3)) s, KL = $(round(r.relative_entropy; digits=4)), final loss = $(round(r.final_loss; digits=6))")
+end

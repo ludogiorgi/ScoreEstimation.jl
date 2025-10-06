@@ -10,9 +10,9 @@ using ScoreEstimation
     obs = randn(D, N)
     σ = 0.1
 
-    # KGMM small run (few clusters, quick convergence)
-    @testset "KGMM" begin
-        res = ScoreEstimation.KGMM(σ, obs; prob=0.05, conv_param=5e-2, i_max=10, show_progress=false)
+    # kgmm small run (few clusters, quick convergence)
+    @testset "kgmm" begin
+    res = ScoreEstimation.kgmm(σ, obs; prob=0.05, conv_param=5e-2, i_max=10, show_progress=false)
         @test haskey(res, :centers)
         @test haskey(res, :score)
         @test haskey(res, :divergence)
@@ -25,7 +25,7 @@ using ScoreEstimation
     end
 
     # Training wrapper (preprocessing=true)
-    @testset "Train with KGMM" begin
+    @testset "Train with kgmm" begin
         nn, losses, _, div_fn, jac_fn, res = ScoreEstimation.train(obs;
             preprocessing=true, σ=σ, neurons=[16], n_epochs=3, batch_size=64,
             lr=1e-3, use_gpu=false, verbose=false, kgmm_kwargs=(prob=0.05, conv_param=5e-2, i_max=10, show_progress=false),
