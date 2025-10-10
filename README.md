@@ -31,10 +31,11 @@ The repository is organized as follows:
 │   ├── ScoreEstimation.jl   # module; exports KGMM, train
 │   ├── preprocessing.jl     # KGMM implementation
 │   └── training.jl          # Flux training (DSM + KGMM preprocessing)
-├── scripts/                 # Example scripts (reduced.jl, triad.jl)
+├── scripts/                 # Example scripts (incl. reduced/ subfolder)
 ├── test/                    # Pkg.test entry
 │   └── runtests.jl
 ├── figures/                 # Generated figures from scripts
+├── reduced/                 # Reduced-model assets (scripts, data, figures)
 ├── experiments/             # Playground notebooks/scripts (optional)
 └── README.md
 ```
@@ -108,7 +109,7 @@ When `verbose=true`, training loops display a progress bar (ProgressMeter.jl) fo
 ## Examples (in `scripts/`)
 
 - 1D reduced example (with analytic comparisons):
-  - Run: `julia --project=. scripts/reduced.jl`
+  - Run: `julia --project=scripts reduced/reduced.jl`
   - Produces a two‑panel figure comparing analytic, KGMM and NN results, plus a second figure comparing NN+KGMM vs NN (DSM).
 
 - 3D triad system (no analytic reference):

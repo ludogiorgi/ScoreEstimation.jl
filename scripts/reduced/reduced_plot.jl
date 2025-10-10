@@ -1,10 +1,15 @@
 using Pkg
-Pkg.activate(".")
+Pkg.activate(joinpath(@__DIR__, ".."))
 Pkg.instantiate()
 
-using GLMakie
+using CairoMakie
+using CairoMakie: Figure, Axis, Legend, Theme, set_theme!, scatter!, lines!, axislegend, save
 using HDF5
 using Colors
+const REDUCED_ROOT = @__DIR__
+const REDUCED_FIGURES_DIR = joinpath(REDUCED_ROOT, "figures")
+const REDUCED_PUB_DIR = joinpath(REDUCED_FIGURES_DIR, "publication")
+const REDUCED_DATA_DIR = joinpath(REDUCED_ROOT, "data")
 
 # Set publication-ready theme
 set_theme!(Theme(
@@ -34,14 +39,14 @@ color_emp = colorant"#7f7f7f"       # gray
 color_nopreproc = colorant"#d62728" # red
 color_preproc = colorant"#2ca02c"   # green
 
-mkpath("figures/publication")
+mkpath(REDUCED_PUB_DIR)
 
 # ============================================================================
 # FIGURE 1: Performance Comparison (preprocessing true vs false)
 # ============================================================================
 
 @info "Loading performance comparison data..."
-h5open("data/GMM_data/reduced_performances.h5", "r") do file
+h5open(joinpath(REDUCED_DATA_DIR, "reduced_performances.h5"), "r") do file
     train_times_no_pre = read(file, "results_no_pre_time")
     rel_ent_no_pre = read(file, "results_no_pre_relent")
     train_times_pre = read(file, "results_pre_time")
@@ -88,8 +93,8 @@ h5open("data/GMM_data/reduced_performances.h5", "r") do file
     Legend(fig1[1, 2], ax1, framevisible = true, labelsize = 14)
 
     # Save figure
-    save("figures/publication/reduced_performance_comparison.png", fig1, px_per_unit=2)
-    save("figures/publication/reduced_performance_comparison.pdf", fig1)
+    save(joinpath(REDUCED_PUB_DIR, "reduced_performance_comparison.png"), fig1, px_per_unit=2)
+    save(joinpath(REDUCED_PUB_DIR, "reduced_performance_comparison.pdf"), fig1)
 
     @info "Saved performance comparison figure"
 end
@@ -99,7 +104,7 @@ end
 # ============================================================================
 
 @info "Loading compute analysis data..."
-h5open("data/GMM_data/reduced_compute.h5", "r") do file
+h5open(joinpath(REDUCED_DATA_DIR, "reduced_compute.h5"), "r") do file
     # Read trajectory data
     trajectory_obs = read(file, "trajectory_obs")
     trajectory_nn = read(file, "trajectory_nn")
@@ -194,14 +199,14 @@ h5open("data/GMM_data/reduced_compute.h5", "r") do file
     axislegend(ax3, position = :rt, framevisible = true, labelsize = 14)
 
     # Save figure
-    save("figures/publication/reduced_detailed_analysis.png", fig2, px_per_unit=2)
-    save("figures/publication/reduced_detailed_analysis.pdf", fig2)
+    save(joinpath(REDUCED_PUB_DIR, "reduced_detailed_analysis.png"), fig2, px_per_unit=2)
+    save(joinpath(REDUCED_PUB_DIR, "reduced_detailed_analysis.pdf"), fig2)
 
     @info "Saved detailed analysis figure"
 end
 
 @info "All publication-ready figures generated successfully!"
-@info "Figures saved in: figures/publication/"
+@info "Figures saved in: $(REDUCED_PUB_DIR)"
 println("\nGenerated files:")
 println("  - reduced_performance_comparison.png/.pdf")
 println("  - reduced_detailed_analysis.png/.pdf")

@@ -2,7 +2,7 @@
 
 julia_version = "1.11.7"
 manifest_format = "2.0"
-project_hash = "5ed12f9ea156a02b19ccac8f61f5ce653e1a9113"
+project_hash = "ff2fefb0837fcf34e835abf75d062ab335c2521a"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "27cecae79e5cc9935255f90c53bb831cc3c870d7"
@@ -319,6 +319,18 @@ deps = ["Artifacts", "CUDA_Driver_jll", "JLLWrappers", "LazyArtifacts", "Libdl",
 git-tree-sha1 = "e24c6de116c0735c37e83b8bc05ed60d4d359693"
 uuid = "76a88914-d11a-5bdc-97e0-2f5a05c973a2"
 version = "0.19.1+0"
+
+[[deps.Cairo]]
+deps = ["Cairo_jll", "Colors", "Glib_jll", "Graphics", "Libdl", "Pango_jll"]
+git-tree-sha1 = "71aa551c5c33f1a4415867fe06b7844faadb0ae9"
+uuid = "159f3aea-2a34-519c-b102-8c37f9878175"
+version = "1.1.1"
+
+[[deps.CairoMakie]]
+deps = ["CRC32c", "Cairo", "Colors", "FileIO", "FreeType", "GeometryBasics", "LinearAlgebra", "Makie", "PrecompileTools"]
+git-tree-sha1 = "d69c7593fe9d7d617973adcbe4762028c6899b2c"
+uuid = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+version = "0.11.11"
 
 [[deps.Cairo_jll]]
 deps = ["Artifacts", "Bzip2_jll", "CompilerSupportLibraries_jll", "Fontconfig_jll", "FreeType2_jll", "Glib_jll", "JLLWrappers", "LZO_jll", "Libdl", "Pixman_jll", "Xorg_libXext_jll", "Xorg_libXrender_jll", "Zlib_jll", "libpng_jll"]
@@ -970,6 +982,12 @@ deps = ["DataStructures", "GeometryBasics", "Graphs", "LinearAlgebra", "Makie", 
 git-tree-sha1 = "bdddc4afd944ccc67afbd81791d88d944c36f410"
 uuid = "1ecd5474-83a3-4783-bb4f-06765db800d2"
 version = "0.5.10"
+
+[[deps.Graphics]]
+deps = ["Colors", "LinearAlgebra", "NaNMath"]
+git-tree-sha1 = "a641238db938fff9b2f60d08ed9030387daf428c"
+uuid = "a2bd30eb-e257-5431-a919-1863eab51364"
+version = "1.1.3"
 
 [[deps.Graphite2_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]
@@ -2406,8 +2424,8 @@ uuid = "7e506255-f358-4e82-b7e4-beb19740aa63"
 version = "1.5.0"
 
 [[deps.ScoreEstimation]]
-deps = ["BSON", "CUDA", "Flux", "HDF5", "LinearAlgebra", "ProgressMeter", "Random", "StateSpacePartitions", "Statistics"]
-path = "/Users/ludovico/Library/CloudStorage/OneDrive-MassachusettsInstituteofTechnology/Documents/JuliaProjects/ScoreEstimation"
+deps = ["BSON", "CUDA", "Colors", "FastSDE", "Flux", "GLMakie", "HDF5", "KernelDensity", "LinearAlgebra", "MarkovChainHammer", "ProgressMeter", "QuadGK", "Random", "Revise", "StateSpacePartitions", "Statistics"]
+path = "/Users/ludovico/Library/CloudStorage/OneDrive-MassachusettsInstituteofTechnology/Documents/JuliaProjects/ScoreEstimation.jl"
 uuid = "8d73b47c-4136-4c8d-8aae-21cdc18f4aee"
 version = "0.1.0"
 

@@ -1,5 +1,5 @@
 using Pkg
-Pkg.activate(".")
+Pkg.activate(joinpath(@__DIR__, ".."))
 Pkg.instantiate()
 
 using ScoreEstimation
@@ -10,6 +10,12 @@ using Flux
 using HDF5
 using Random
 using KernelDensity
+const REDUCED_ROOT = @__DIR__
+const REDUCED_FIGURES_DIR = joinpath(REDUCED_ROOT, "figures")
+const REDUCED_SCORE_PDFS_DIR = joinpath(REDUCED_FIGURES_DIR, "score_pdfs")
+const REDUCED_REL_ENT_FIG = joinpath(REDUCED_FIGURES_DIR, "reduced_relative_entropy_vs_time.png")
+const REDUCED_DATA_DIR = joinpath(REDUCED_ROOT, "data")
+const REDUCED_PERF_H5 = joinpath(REDUCED_DATA_DIR, "reduced_performances.h5")
 
 # ---------------- Reduced one-dimensional model ----------------
 const reduced_params = (
@@ -244,13 +250,13 @@ neurons = [100, 50]
 batch_size = 16
 lr = 1e-3
 
-epochs_schedule = [10:10:60...]
-prob_schedule = [0.01:-0.002:0.002...]
+epochs_schedule = [10:10:100...]
+prob_schedule = [0.01:-0.001:0.002...]
 preprocessing_epochs = 1000
 
 Plots.gr()
-
-mkpath("figures/score_pdfs")
+mkpath(REDUCED_FIGURES_DIR)
+mkpath(REDUCED_SCORE_PDFS_DIR)
 
 # Warm-up runs to remove compilation bias from first measurements
 @info "Warm-up (preprocessing=false)"
@@ -351,13 +357,12 @@ Plots.plot!(plot_series, train_times_pre, rel_ent_pre;
     label="preprocessing = true")
 
 display(plot_series)
-mkpath("figures")
-Plots.savefig(plot_series, "figures/reduced_relative_entropy_vs_time.png")
+mkpath(REDUCED_FIGURES_DIR)
+Plots.savefig(plot_series, REDUCED_REL_ENT_FIG)
 
 # ---------------- Persist results to HDF5 ----------------
-mkpath("data/GMM_data")
-
-h5open("data/GMM_data/reduced_performances.h5", "w") do file
+mkpath(REDUCED_DATA_DIR)
+h5open(REDUCED_PERF_H5, "w") do file
     write(file, "epochs_schedule", Float64.(epochs_schedule))
     write(file, "prob_schedule", Float64.(prob_schedule))
     write(file, "results_no_pre_time", Float64.(train_times_no_pre))
@@ -368,8 +373,8 @@ h5open("data/GMM_data/reduced_performances.h5", "w") do file
     write(file, "probabilities", Float64.([r.prob for r in results_pre]))
 end
 
-@info "Saved figures/reduced_relative_entropy_vs_time.png"
-@info "Saved data/GMM_data/reduced_performances.h5"
+@info "Saved $(REDUCED_REL_ENT_FIG)"
+@info "Saved $(REDUCED_PERF_H5)"
 
 # ---------------- Human-readable summary ----------------
 println("\npreprocessing = false (epochs sweep):")

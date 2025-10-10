@@ -1,5 +1,5 @@
 using Pkg
-Pkg.activate(".")
+Pkg.activate(joinpath(@__DIR__, ".."))
 Pkg.instantiate()
 
 using ScoreEstimation
@@ -10,6 +10,12 @@ using Flux
 using HDF5
 using Random
 using KernelDensity
+
+const REDUCED_ROOT = @__DIR__
+const REDUCED_FIGURES_DIR = joinpath(REDUCED_ROOT, "figures")
+const REDUCED_DATA_DIR = joinpath(REDUCED_ROOT, "data")
+const REDUCED_COMPUTE_FIG = joinpath(REDUCED_FIGURES_DIR, "reduced_compute_analysis.png")
+const REDUCED_COMPUTE_H5 = joinpath(REDUCED_DATA_DIR, "reduced_compute.h5")
 
 # ---------------- Reduced one-dimensional model ----------------
 const reduced_params = (
@@ -175,6 +181,13 @@ function score_from_nn_scalar(nn, sigma)
     return inner
 end
 
+# Convert normalized score to physical score
+function score_nn_physical(x_phys::Real, nn, sigma, mean_obs, std_obs)
+    x_norm = (x_phys - mean_obs) / std_obs
+    score_norm = score_from_nn_scalar(nn, sigma)(x_norm)
+    return score_norm / std_obs
+end
+
 # Batched drift function for neural network score
 function create_batched_drift_nn(nn, sigma)
     # Primary 4-arg method (DU,U,p,t)
@@ -235,31 +248,38 @@ samples_nn = generate_langevin_samples(score_fn;
 
 kde_nn = kde(samples_nn)
 
+# ---------------- Unnormalize data for plotting/saving ----------------
+# Unnormalize samples
+true_samples_phys = true_samples .* std_obs .+ mean_obs
+samples_nn_phys = samples_nn .* std_obs .+ mean_obs
+
+# Compute PDFs in physical space
+kde_true_phys = kde(true_samples_phys)
+kde_nn_phys = kde(samples_nn_phys)
+kde_emp_phys = kde(vec(obs_nn))
+
 # ---------------- Compute comparison data ----------------
-# Grid for score and PDF comparison
-x_min = min(minimum(true_samples), minimum(samples_nn), minimum(obs_nn))
-x_max = max(maximum(true_samples), maximum(samples_nn), maximum(obs_nn))
-x_grid = range(x_min, x_max; length=400)
+# Grid for score and PDF comparison (physical space)
+x_min_phys = min(minimum(obs_nn), minimum(true_samples_phys), minimum(samples_nn_phys))
+x_max_phys = max(maximum(obs_nn), maximum(true_samples_phys), maximum(samples_nn_phys))
+x_grid_phys = range(x_min_phys, x_max_phys; length=400)
 
-# Compute score functions
-score_true_vals = score_true_norm_scalar.(x_grid)
-score_nn_vals = map(score_fn, x_grid)
-
-# Compute PDFs
-kde_emp = kde(vec(obs))
+# Compute score functions in physical space
+score_true_vals_phys = score_true_physical.(x_grid_phys)
+score_nn_vals_phys = [score_nn_physical(x, nn, sigma_value, mean_obs, std_obs) for x in x_grid_phys]
 
 # Relative entropy
 rel_ent = ScoreEstimation.relative_entropy(true_samples, samples_nn; npoints=REL_ENT_POINTS)
 @info "Relative entropy" rel_ent=rel_ent
 
-# ---------------- Plotting with 3 subplots ----------------
+# ---------------- Plotting with 3 subplots (physical space) ----------------
 Plots.gr()
-mkpath("figures")
+mkpath(REDUCED_FIGURES_DIR)
 
 fig = Plots.plot(layout=(3, 1), size=(900, 1200))
 
-# Subplot 1: Trajectory comparison (obs vs generated)
-plot_len = min(5000, length(obs_nn), length(samples_nn))
+# Subplot 1: Trajectory comparison (obs vs generated) - physical space
+plot_len = min(5000, length(obs_nn), length(samples_nn_phys))
 Plots.plot!(fig, 1:plot_len, obs_nn[1:plot_len];
     label="observed trajectory",
     xlabel="time step",
@@ -269,15 +289,15 @@ Plots.plot!(fig, 1:plot_len, obs_nn[1:plot_len];
     alpha=0.7,
     subplot=1,
     legend=:topright)
-Plots.plot!(fig, 1:plot_len, samples_nn[1:plot_len];
+Plots.plot!(fig, 1:plot_len, samples_nn_phys[1:plot_len];
     label="NN score trajectory",
     linewidth=1.5,
     alpha=0.7,
     linestyle=:dash,
     subplot=1)
 
-# Subplot 2: Score function comparison
-Plots.plot!(fig, x_grid, score_true_vals;
+# Subplot 2: Score function comparison - physical space
+Plots.plot!(fig, x_grid_phys, score_true_vals_phys;
     label="analytic score",
     xlabel="x",
     ylabel="score s(x)",
@@ -285,14 +305,14 @@ Plots.plot!(fig, x_grid, score_true_vals;
     linewidth=2,
     subplot=2,
     legend=:topright)
-Plots.plot!(fig, x_grid, score_nn_vals;
+Plots.plot!(fig, x_grid_phys, score_nn_vals_phys;
     label="NN score",
     linewidth=2,
     linestyle=:dash,
     subplot=2)
 
-# Subplot 3: PDF comparison
-Plots.plot!(fig, kde_true.x, kde_true.density;
+# Subplot 3: PDF comparison - physical space
+Plots.plot!(fig, kde_true_phys.x, kde_true_phys.density;
     label="reference PDF (analytic score)",
     xlabel="x",
     ylabel="density",
@@ -300,12 +320,12 @@ Plots.plot!(fig, kde_true.x, kde_true.density;
     linewidth=2,
     subplot=3,
     legend=:topright)
-Plots.plot!(fig, kde_nn.x, kde_nn.density;
+Plots.plot!(fig, kde_nn_phys.x, kde_nn_phys.density;
     label="NN score PDF",
     linewidth=2,
     linestyle=:dash,
     subplot=3)
-Plots.plot!(fig, kde_emp.x, kde_emp.density;
+Plots.plot!(fig, kde_emp_phys.x, kde_emp_phys.density;
     label="empirical PDF (obs)",
     linewidth=2,
     linestyle=:dot,
@@ -313,38 +333,38 @@ Plots.plot!(fig, kde_emp.x, kde_emp.density;
     subplot=3)
 
 display(fig)
-Plots.savefig(fig, "figures/reduced_compute_analysis.png")
+Plots.savefig(fig, REDUCED_COMPUTE_FIG)
 
 # ---------------- Save all data to HDF5 ----------------
-mkpath("data/GMM_data")
+mkpath(REDUCED_DATA_DIR)
 
-h5open("data/GMM_data/reduced_compute.h5", "w") do file
-    # Training data
-    write(file, "obs_nn", Float32.(obs_nn))
+h5open(REDUCED_COMPUTE_H5, "w") do file
+    # Training data (normalized for reference)
     write(file, "obs_normalized", Float32.(obs))
     write(file, "mean_obs", Float64(mean_obs))
     write(file, "std_obs", Float64(std_obs))
 
-    # Generated samples
-    write(file, "true_samples", Float32.(true_samples))
-    write(file, "samples_nn", Float32.(samples_nn))
+    # Physical space data (what we plot/analyze)
+    write(file, "obs_nn", Float32.(obs_nn))
+    write(file, "true_samples", Float32.(true_samples_phys))
+    write(file, "samples_nn", Float32.(samples_nn_phys))
 
-    # Trajectory comparison (first plot_len points)
+    # Trajectory comparison (first plot_len points) - physical space
     write(file, "trajectory_obs", Float32.(obs_nn[1:plot_len]))
-    write(file, "trajectory_nn", Float32.(samples_nn[1:plot_len]))
+    write(file, "trajectory_nn", Float32.(samples_nn_phys[1:plot_len]))
 
-    # Score function comparison
-    write(file, "x_grid", Float32.(x_grid))
-    write(file, "score_true", Float32.(score_true_vals))
-    write(file, "score_nn", Float32.(score_nn_vals))
+    # Score function comparison - physical space
+    write(file, "x_grid", Float32.(x_grid_phys))
+    write(file, "score_true", Float32.(score_true_vals_phys))
+    write(file, "score_nn", Float32.(score_nn_vals_phys))
 
-    # PDF comparison
-    write(file, "pdf_true_x", Float32.(kde_true.x))
-    write(file, "pdf_true_density", Float32.(kde_true.density))
-    write(file, "pdf_nn_x", Float32.(kde_nn.x))
-    write(file, "pdf_nn_density", Float32.(kde_nn.density))
-    write(file, "pdf_emp_x", Float32.(kde_emp.x))
-    write(file, "pdf_emp_density", Float32.(kde_emp.density))
+    # PDF comparison - physical space
+    write(file, "pdf_true_x", Float32.(kde_true_phys.x))
+    write(file, "pdf_true_density", Float32.(kde_true_phys.density))
+    write(file, "pdf_nn_x", Float32.(kde_nn_phys.x))
+    write(file, "pdf_nn_density", Float32.(kde_nn_phys.density))
+    write(file, "pdf_emp_x", Float32.(kde_emp_phys.x))
+    write(file, "pdf_emp_density", Float32.(kde_emp_phys.density))
 
     # Metadata
     write(file, "n_clusters", Int(res.Nc))
@@ -354,8 +374,8 @@ h5open("data/GMM_data/reduced_compute.h5", "w") do file
     write(file, "n_epochs", Int(n_epochs))
 end
 
-@info "Saved figures/reduced_compute_analysis.png"
-@info "Saved data/GMM_data/reduced_compute.h5"
+@info "Saved $(REDUCED_COMPUTE_FIG)"
+@info "Saved $(REDUCED_COMPUTE_H5)"
 
 println("\nAnalysis summary:")
 println("  Clusters: $(res.Nc)")

@@ -1,5 +1,5 @@
 using Pkg
-Pkg.activate(".")
+Pkg.activate(joinpath(@__DIR__, ".."))
 Pkg.instantiate()
 
 using ScoreEstimation
@@ -10,6 +10,11 @@ using Flux
 using HDF5
 using Random
 using KernelDensity
+
+const REDUCED_ROOT = @__DIR__
+const REDUCED_FIGURES_DIR = joinpath(REDUCED_ROOT, "figures")
+const REDUCED_SCORE_PDFS_DIR = joinpath(REDUCED_FIGURES_DIR, "score_pdfs")
+const REDUCED_DATA_DIR = joinpath(REDUCED_ROOT, "data", "GMM_data")
 
 # ---------------- Reduced one-dimensional model ----------------
 const reduced_params = (
@@ -250,7 +255,7 @@ preprocessing_epochs = 1000
 
 Plots.gr()
 
-mkpath("figures/score_pdfs")
+mkpath(REDUCED_SCORE_PDFS_DIR)
 
 # Warm-up runs to remove compilation bias from first measurements
 @info "Warm-up (preprocessing=false)"
@@ -347,7 +352,7 @@ for (i, epochs) in enumerate(epochs_schedule)
         linestyle=:dash,
         subplot=2)
     display(iter_fig)
-    Plots.savefig(iter_fig, "figures/score_pdfs/pre_false_epochs_$(epochs).png")
+    Plots.savefig(iter_fig, joinpath(REDUCED_SCORE_PDFS_DIR, "pre_false_epochs_$(epochs).png"))
     push!(results_no_pre, (epochs=epochs, train_time=t_train, relative_entropy=rel_ent, final_loss=losses[end]))
     GC.gc()
     @info "preprocessing=false" epochs=epochs train_time=t_train relative_entropy=rel_ent
@@ -412,7 +417,7 @@ for (i, prob) in enumerate(prob_schedule)
         linestyle=:dash,
         subplot=2)
     display(iter_fig)
-    Plots.savefig(iter_fig, "figures/score_pdfs/pre_true_clusters_$(nc_actual).png")
+    Plots.savefig(iter_fig, joinpath(REDUCED_SCORE_PDFS_DIR, "pre_true_clusters_$(nc_actual).png"))
     push!(results_pre, (clusters=nc_actual, clusters_actual=nc_actual, prob=prob_used, train_time=t_train, relative_entropy=rel_ent, final_loss=losses[end]))
     GC.gc()
     @info "preprocessing=true" clusters=nc_actual train_time=t_train relative_entropy=rel_ent
@@ -436,13 +441,14 @@ Plots.plot!(plot_series, train_times_pre, rel_ent_pre;
     label="preprocessing = true")
 
 display(plot_series)
-mkpath("figures")
-Plots.savefig(plot_series, "figures/reduced_relative_entropy_vs_time.png")
+mkpath(REDUCED_FIGURES_DIR)
+relative_entropy_fig_path = joinpath(REDUCED_FIGURES_DIR, "reduced_relative_entropy_vs_time.png")
+Plots.savefig(plot_series, relative_entropy_fig_path)
 
 # ---------------- Persist results ----------------
-mkpath("data/GMM_data")
+mkpath(REDUCED_DATA_DIR)
 
-h5open("data/GMM_data/reduced_comparison.h5", "w") do file
+h5open(joinpath(REDUCED_DATA_DIR, "reduced_comparison.h5"), "w") do file
     write(file, "epochs_schedule", Float64.(epochs_schedule))
     write(file, "prob_schedule", Float64.(prob_schedule))
     write(file, "results_no_pre_time", Float64.(train_times_no_pre))
@@ -454,8 +460,8 @@ h5open("data/GMM_data/reduced_comparison.h5", "w") do file
     write(file, "true_samples", Float32.(true_samples))
 end
 
-@info "Saved figures/reduced_relative_entropy_vs_time.png"
-@info "Saved data/GMM_data/reduced_comparison.h5"
+@info "Saved $(relative_entropy_fig_path)"
+@info "Saved $(joinpath(REDUCED_DATA_DIR, "reduced_comparison.h5"))"
 
 # ---------------- Human-readable summary ----------------
 println("\npreprocessing = false (epochs sweep):")

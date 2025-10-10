@@ -183,6 +183,9 @@ function _ema_partition_means_collect(σ::Float64, μ::AbstractMatrix{<:Real};
     # Accumulators across EMA
     sum_z2 = copy(z2_sums)
     counts = copy(cnts)
+    # Keep running sums of means to weight by counts per cluster across batches
+    sum_z_means = Ez .* reshape(float.(counts), 1, :)
+    sum_x_means = Xc .* reshape(float.(counts), 1, :)
 
     Δ = 1.0
     i = 1
@@ -191,14 +194,32 @@ function _ema_partition_means_collect(σ::Float64, μ::AbstractMatrix{<:Real};
         _assign_labels!(labels, x, ssp)
         Ez_b, Xc_b, z2_b, cnt_b = _batch_stats(labels, z, x, μ)
 
-        @inbounds @. Ez_new  = (Ez_b  + i * Ez_old)  / (i + 1)
-        # @inbounds @. Emu_new = (Emu_b + i * Emu_old) / (i + 1)   # (commented)
-        @inbounds @. Xc_new  = (Xc_b  + i * Xc_old)  / (i + 1)
+        # Update running sums for means using counts-weighted batch contributions
+        @inbounds for c in 1:C
+            n_new = cnt_b[c]
+            if n_new > 0
+                @views sum_z_means[:, c] .+= Ez_b[:, c] .* float(n_new)
+                @views sum_x_means[:, c] .+= Xc_b[:, c] .* float(n_new)
+            end
+        end
 
         # Fold divergence statistics into the EMA loop
         @inbounds @simd for c in 1:C
             sum_z2[c] += z2_b[c]
             counts[c] += cnt_b[c]
+        end
+
+        # Recompute means from sums with updated counts
+        @inbounds for c in 1:C
+            n_tot = counts[c]
+            if n_tot > 0
+                invn = inv(float(n_tot))
+                @views Ez_new[:, c] .= sum_z_means[:, c] .* invn
+                @views Xc_new[:, c] .= sum_x_means[:, c] .* invn
+            else
+                @views Ez_new[:, c] .= 0
+                @views Xc_new[:, c] .= 0
+            end
         end
 
         # Δ = mean(abs2, Ez_new - Ez_old) / max(mean(abs2, Ez_new), ϵ)
