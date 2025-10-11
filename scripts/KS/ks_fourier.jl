@@ -4,11 +4,9 @@ Pkg.instantiate()
 
 # Stand-alone driver that mirrors the reduced 1D workflow in `scripts/reduced/`
 # but targets the 32-mode projection of the Kuramoto–Sivashinsky dataset. The
-# script performs: data loading, stride-based subsampling, score training via
+# script performs: data loading, Fourier/PCA compression, score training via
 # `ScoreEstimation.train`, Langevin sampling with FastSDE, and
 # PDF/relative-entropy diagnostics in physical space.
-
-using CairoMakie
 
 using FFTW
 using FastSDE
@@ -16,6 +14,7 @@ using Flux
 using HDF5
 using KernelDensity
 using LinearAlgebra
+using Plots
 using Random
 using Printf
 using ScoreEstimation
@@ -27,15 +26,15 @@ const KS_FIG_DIR = joinpath(KS_ROOT, "figures")
 const KS_DATAFILE = joinpath(KS_DATA_DIR, "new_ks.hdf5")
 const KS_OUTPUT_H5 = joinpath(KS_DATA_DIR, "ks_results.h5")
 
-CairoMakie.activate!()
+Plots.gr()
 
 # Configuration container that keeps all runtime parameters together. These
 # defaults (stride, σ, network shape, etc.) reflect the heuristics used in the
 # reduced 1D scripts but scaled up to 32-dimensional latent coordinates.
-struct KSConfigs
+struct KSConfig
     stride::Int
     max_snapshots::Int
-    n_modes::Int
+    modes::Int
     seed::Int
     sigma::Float64
     neurons::Vector{Int}
@@ -51,6 +50,7 @@ struct KSConfigs
     langevin_ens::Int
     langevin_burnin::Int
     sample_keep::Int
+    observable_index::Int
     plot_window::Int
     kde_max_samples::Int
     rel_entropy_points::Int
@@ -98,16 +98,15 @@ function build_config()
     args = parse_args()
     stride = parse(Int, get(args, "stride", "1"))                 # Subsampling interval along time axis when reading KS data
     max_snapshots = parse(Int, get(args, "max-snapshots", "0"))   # Hard cap on number of temporal snapshots (0 = no cap)
-    n_modes_arg = get(args, "n-modes", get(args, "modes", "1"))
-    n_modes = parse(Int, n_modes_arg)                               # Spatial stride for mode subsampling (1 = keep all grid points)
+    modes = parse(Int, get(args, "modes", "6"))                      # Number of retained PCA modes (latent dimensionality)
     seed = parse(Int, get(args, "seed", "2024"))                      # RNG seed for reproducibility (data shuffles, training, sampling)
     sigma = parse(Float64, get(args, "sigma", "0.1"))                # Fixed noise level σ used in ε-training / score scaling
     neurons = [128, 64]
     n_epochs = parse(Int, get(args, "n-epochs", "100"))             # Training epochs for ε-network
-    batch_size = parse(Int, get(args, "batch-size", "64"))            # Batch size for Flux DataLoader
+    batch_size = parse(Int, get(args, "batch-size", "32"))            # Batch size for Flux DataLoader
     lr = parse(Float64, get(args, "lr", "1e-3"))                      # Learning rate for Adam optimizer
     prob = parse(Float64, get(args, "prob", "1e-6"))                  # kgmm: probability threshold for cluster pruning / weighting
-    conv_param = parse(Float64, get(args, "conv-param", "1e-2"))       # kgmm: convergence tolerance
+    conv_param = parse(Float64, get(args, "conv-param", "5e-3"))       # kgmm: convergence tolerance
     i_max = parse(Int, get(args, "imax", "120"))                      # kgmm: max iterations
     show_progress = get(args, "show-progress", "false") == "true"     # Verbose kgmm progress display toggle
     kgmm_kwargs = (prob=prob, conv_param=conv_param, i_max=i_max, show_progress=show_progress)  # Aggregated kgmm kwargs
@@ -119,17 +118,18 @@ function build_config()
     langevin_ens = parse(Int, get(args, "langevin-ens", "1"))         # Number of parallel ensemble members during sampling
     langevin_burnin = parse(Int, get(args, "langevin-burnin", "2000"))  # Discard initial steps (thermalization)
     sample_keep = parse(Int, get(args, "sample-keep", "5000000"))        # Optional cap on number of generated latent samples retained for analysis
+    observable_index = parse(Int, get(args, "observable-index", "64"))  # Spatial grid index for physical observable PDF comparison
     plot_window = parse(Int, get(args, "plot-window", "1000"))         # Max length of time series segment displayed in subplot 1
     kde_max_samples = parse(Int, get(args, "kde-max-samples", "0"))  # Upper bound on samples fed to KDE (0 = use all)
     rel_entropy_points = parse(Int, get(args, "rel-entropy-points", "2048"))  # Number of quadrature points for relative entropy estimation
     normalize_mode_str = lowercase(get(args, "normalize-mode", "per_dim"))  # Normalization mode: "max" or "per_dim"
     normalize_mode = normalize_mode_str == "max" ? :max : :per_dim
-    train_copies = max(1, parse(Int, get(args, "train-copies", "1")))
+    train_copies = max(1, parse(Int, get(args, "train-copies", "10")))
     dataset_key_str = strip(get(args, "dataset-key", ""))
     dataset_key = isempty(dataset_key_str) ? nothing : dataset_key_str
-    return KSConfig(stride, max_snapshots, n_modes, seed, sigma, neurons, n_epochs, batch_size, lr,
+    return KSConfig(stride, max_snapshots, modes, seed, sigma, neurons, n_epochs, batch_size, lr,
         kgmm_kwargs, train_max, langevin_boundary, langevin_dt, langevin_steps, langevin_resolution,
-        langevin_ens, langevin_burnin, sample_keep, plot_window,
+        langevin_ens, langevin_burnin, sample_keep, observable_index, plot_window,
         kde_max_samples, rel_entropy_points, normalize_mode, train_copies, dataset_key)
 end
 
@@ -139,7 +139,7 @@ end
 
 Read the historical KS simulation stored in `ks_old.hdf5`. We lazily stride the
 time axis to control memory and optionally cap the number of snapshots so the
-downstream subsampling/training pipeline remains tractable.
+downstream PCA/training pipeline remains tractable.
 """
 function load_ks_data(path::AbstractString; stride::Int, max_snapshots::Int, dataset_key::Union{Nothing,String}=nothing)
     @info "Loading KS data" path stride max_snapshots dataset_key
@@ -153,13 +153,15 @@ function load_ks_data(path::AbstractString; stride::Int, max_snapshots::Int, dat
                 obj = file[name]
                 try
                     if obj isa HDF5.Dataset
+                        dims = size(obj)
+                        length(dims) == 2 || continue
                         push!(dataset_candidates, String(name))
                     end
                 finally
                     close(obj)
                 end
             end
-            preferred_order = ("u", "timeseries", "field", "data")
+            preferred_order = ("u", "timeseries", "timeseries_aligned", "field", "data")
             for candidate in preferred_order
                 if candidate in dataset_candidates
                     target_key = candidate
@@ -204,18 +206,93 @@ function load_ks_data(path::AbstractString; stride::Int, max_snapshots::Int, dat
 end
 
 """
-    select_modes(data, stride) -> (Matrix, Vector{Int})
+    pack_fourier!(dest, coeffs)
 
-Subsample the spatial grid by keeping every `stride`-th coordinate. The
-returned matrix contains the centered values of the retained coordinates while
-the companion vector lists the selected indices for reconstruction.
+Store the reduced real/imag parts of an rFFT result into a purely real buffer.
+This matches the layout expected by `fourier_real_matrix` and ensures the PCA
+operates on 2·(m-1)+2 real degrees of freedom (DC and Nyquist remain real).
 """
-function select_modes(data::AbstractMatrix, stride::Int)
-    stride <= 0 && error("n_modes (stride) must be positive; got $(stride)")
-    nx, _ = size(data)
-    indices = collect(1:stride:nx)
-    isempty(indices) && error("Mode subsampling produced no coordinates; check n_modes and grid size")
-    return data[indices, :], indices
+function pack_fourier!(dest::AbstractVector{Float64}, coeffs::AbstractVector{ComplexF64})
+    n_freq = length(coeffs)
+    dest[1] = real(coeffs[1])
+    idx = 2
+    for k in 2:(n_freq - 1)
+        dest[idx] = real(coeffs[k])
+        dest[idx + 1] = imag(coeffs[k])
+        idx += 2
+    end
+    dest[end] = real(coeffs[end])
+    return dest
+end
+
+"""
+    unpack_fourier(vec, n_freq) -> Vector{ComplexF64}
+
+Inverse operation of `pack_fourier!`; recreates the complex spectrum prior to
+calling `irfft`. Keeping the serialization logic local avoids aliasing errors
+when future contributors tweak the latent dimension.
+"""
+function unpack_fourier(vec::AbstractVector{<:Real}, n_freq::Int)
+    coeffs = Vector{ComplexF64}(undef, n_freq)
+    coeffs[1] = Complex(vec[1], 0.0)
+    idx = 2
+    for k in 2:(n_freq - 1)
+        coeffs[k] = Complex(vec[idx], vec[idx + 1])
+        idx += 2
+    end
+    coeffs[n_freq] = Complex(vec[end], 0.0)
+    return coeffs
+end
+
+"""
+    fourier_real_matrix(data) -> Matrix{Float64}
+
+Apply `rfft` snapshot-wise and collapse complex pairs so each column represents
+the KS state in the (half) Fourier basis. This is the analogue of the scalar
+projection in `reduced_compute.jl`, but we preserve 32 spatial modes here.
+"""
+function fourier_real_matrix(data::AbstractMatrix)
+    nx, nt = size(data)
+    n_freq = div(nx, 2) + 1
+    output = Matrix{Float64}(undef, nx, nt)
+    temp = Vector{Float64}(undef, nx)
+    for j in 1:nt
+        coeffs = rfft(@view data[:, j])
+        pack_fourier!(temp, coeffs)
+        output[:, j] = temp
+    end
+    return output
+end
+
+"""
+    inverse_fourier_real(vec, nx) -> Vector{Float64}
+
+Recover the physical field by reversing the packing and running `irfft`.
+Reattaching the spatial mean happens later in `reconstruct_fields`.
+"""
+function inverse_fourier_real(vec::AbstractVector{<:Real}, nx::Int)
+    n_freq = div(nx, 2) + 1
+    coeffs = unpack_fourier(vec, n_freq)
+    return real(irfft(coeffs, nx))
+end
+
+"""
+    compute_pca(data, modes)
+
+Perform an SVD-equivalent PCA on the packed Fourier snapshots and keep the
+leading `modes` eigenvectors. Persisted basis/mean mirror the reduced 1D logic
+but now capture coherent structures of the full KS attractor.
+"""
+function compute_pca(data::AbstractMatrix, modes::Int)
+    μ = mean(data; dims=2)
+    data_centered = data .- μ
+    cov = data_centered * transpose(data_centered) / (size(data_centered, 2) - 1)
+    evals, evecs = eigen(Symmetric(cov))
+    order = sortperm(evals; rev=true)
+    basis = evecs[:, order[1:modes]]
+    explained = evals[order]
+    coords = transpose(basis) * data_centered
+    return basis, coords, vec(μ), explained
 end
 
 """
@@ -457,16 +534,21 @@ function sample_langevin(dim::Int, nn, cfg::KSConfig)
 end
 
 """
-    assemble_physical_subset(X, mean_field, indices) -> Matrix
+    reconstruct_fields(X, basis, fourier_mean, nx, mean_field)
 
-Convert centered snapshots restricted to `indices` back into physical-space
-values by adding the spatial mean of the retained coordinates. The result is a
-matrix containing only the sampled locations, matching the latent dimensionality.
+Project normalized latent samples back to physical space by undoing PCA and the
+Fourier packing. This is the KS analogue of rebuilding the scalar SDE signals
+in the reduced scripts, but now returns full spatial snapshots.
 """
-function assemble_physical_subset(X::AbstractMatrix, mean_field::AbstractVector, indices::AbstractVector{Int})
-    isempty(indices) && error("Cannot assemble physical subset with no retained indices")
-    subset_mean = reshape(mean_field[indices], :, 1)
-    return subset_mean .+ X
+function reconstruct_fields(X::AbstractMatrix, basis::AbstractMatrix, fourier_mean::AbstractVector, nx::Int, mean_field::AbstractVector)
+    fourier_mean_mat = reshape(fourier_mean, :, 1)
+    coeffs = basis * X .+ fourier_mean_mat
+    n_samples = size(X, 2)
+    fields = Matrix{Float64}(undef, nx, n_samples)
+    for j in 1:n_samples
+        fields[:, j] = inverse_fourier_real(@view(coeffs[:, j]), nx) .+ mean_field
+    end
+    return fields
 end
 
 function collect_for_kde(mat::AbstractMatrix, max_samples::Int)
@@ -513,168 +595,95 @@ function select_subset(X::AbstractMatrix, max_count::Int)
 end
 
 """
-    build_plot(series_emp, series_gen, X, X_gen, kde_emp, kde_gen,
-               rel_ent, cfg, cluster_count, delta_t, observable_idx)
+    ensure_observable_index(idx, nx) -> Int
 
-Create a publication-style diagnostic figure with six panels: a physical-space
-time series comparison, a univariate PDF overlay, and four latent joint-density
-heatmaps contrasting empirical and generated data.
+Clamp the user-provided observable index into the spatial grid bounds. This
+avoids runtime bounds errors when experimenting with different resolutions.
 """
-function build_plot(series_emp::AbstractVector, series_gen::AbstractVector,
+function ensure_observable_index(idx::Int, nx::Int)
+    return clamp(idx, 1, nx)
+end
+
+"""
+    build_plot(series_emp, series_rec, series_gen, X, X_gen, kde_emp, kde_rec, kde_gen, rel_ent, cfg, cluster_count)
+
+Compose diagnostics comparing physical-space observables and latent spreads.
+We display raw empirical data, the empirical field reconstructed via PCA
+compression, and the samples generated by the learned score model.
+"""
+function build_plot(series_emp::AbstractVector, series_rec::AbstractVector, series_gen::AbstractVector,
                     X::AbstractMatrix, X_gen::AbstractMatrix,
-                    kde_emp::KernelDensity.UnivariateKDE,
+                    Xn::AbstractMatrix, X_gen_n::AbstractMatrix,
+                    kde_emp::KernelDensity.UnivariateKDE, kde_rec::KernelDensity.UnivariateKDE,
                     kde_gen::KernelDensity.UnivariateKDE,
-                    rel_ent::Real, cfg::KSConfig, cluster_count::Integer,
-                    delta_t, observable_idx::Int)
+                    rel_ent::Real, cfg::KSConfig, cluster_count::Integer)
     mkpath(KS_FIG_DIR)
     sigma_tag = replace(@sprintf("%0.5f", cfg.sigma), "." => "p")
-    mode_count = size(X, 1)
+    modes_tag = cfg.modes
     clusters_tag = max(cluster_count, 0)
-    stride_tag = cfg.n_modes
-    fig_name = @sprintf("ks_analysis_dim%d_stride%d_sigma%s_clusters%d.png", mode_count, stride_tag, sigma_tag, clusters_tag)
+    fig_name = @sprintf("ks_analysis_modes%d_sigma%s_clusters%d.png", modes_tag, sigma_tag, clusters_tag)
+    fig_modes_name = @sprintf("ks_modes_pdfs_modes%d_sigma%s_clusters%d.png", modes_tag, sigma_tag, clusters_tag)
     fig_path = joinpath(KS_FIG_DIR, fig_name)
+    fig_modes_path = joinpath(KS_FIG_DIR, fig_modes_name)
+    fig = plot(layout=(3, 1), size=(900, 1200))
+    tshow = minimum([cfg.plot_window, length(series_emp), length(series_rec), length(series_gen)])
+    plot!(fig[1], 1:tshow, series_emp[1:tshow]; label="empirical", color=:steelblue)
+    plot!(fig[1], 1:tshow, series_rec[1:tshow]; label="reconstructed", color=:forestgreen, linestyle=:dot)
+    plot!(fig[1], 1:tshow, series_gen[1:tshow]; label="generated", color=:tomato, linestyle=:dash)
+    xlabel!(fig[1], "time index")
+    ylabel!(fig[1], "u(x*, t)")
+    title!(fig[1], "Observable time series (idx=$(cfg.observable_index))")
 
-    fig = Figure(size=(2250, 2250), fontsize=32)
-    main_layout = fig[1:3, 1:3] = GridLayout()
-    time_panel = main_layout[1, 1:3] = GridLayout()
-    left_panel = main_layout[2:3, 1] = GridLayout()
-    right_panel = main_layout[2:3, 2:3] = GridLayout()
+    std_emp = vec(std(X; dims=2))
+    std_gen = vec(std(X_gen; dims=2))
+    bar!(fig[2], 1:length(std_emp), std_emp; label="empirical", color=:steelblue, alpha=0.8)
+    bar!(fig[2], 1:length(std_gen), std_gen; label="generated", color=:tomato, alpha=0.6)
+    xlabel!(fig[2], "Reduced coordinate")
+    ylabel!(fig[2], "Std. deviation")
+    title!(fig[2], "Reduced coordinate spread")
 
-    # --- Time series panel ---------------------------------------------------
-    time_ax = Axis(time_panel[1, 1:2];
-        xlabel="t",
-        ylabel="u(x*, t)",
-    title=@sprintf("Time series (idx=%d)", observable_idx),
-        titlesize=36,
-        xlabelsize=32,
-        ylabelsize=32)
-    tshow = minimum((cfg.plot_window, length(series_emp), length(series_gen)))
-    dt_plot = isnothing(delta_t) ? 1.0 : delta_t * cfg.stride
-    time_vector = (0:(tshow - 1)) .* dt_plot
-    lines!(time_ax, time_vector, series_emp[1:tshow]; color=:steelblue, linewidth=1.5, label="Empirical")
-    lines!(time_ax, time_vector, series_gen[1:tshow]; color=:tomato, linewidth=1.5, linestyle=:dash, label="Generated")
-    axislegend(time_ax; position=:rt, framevisible=true, backgroundcolor=:white, labelsize=28)
+    plot!(fig[3], kde_emp.x, kde_emp.density; label="empirical PDF", color=:steelblue, lw=2)
+    plot!(fig[3], kde_rec.x, kde_rec.density; label="reconstructed PDF", color=:forestgreen, lw=2, linestyle=:dot)
+    plot!(fig[3], kde_gen.x, kde_gen.density; label="generated PDF", color=:tomato, lw=2, linestyle=:dash)
+    xlabel!(fig[3], "u(x, t)")
+    ylabel!(fig[3], "Density")
+    title!(fig[3], "PDF comparison (all grid points, KL=$(round(rel_ent; digits=4)))")
 
-    # --- Univariate physical PDF -------------------------------------------
-    univariate_ax = Axis(left_panel[1, 1];
-        xlabel="u(x, t)",
-        ylabel="PDF",
-        title="Physical-space PDF",
-        titlesize=36,
-        xlabelsize=32,
-        ylabelsize=32)
-    lines!(univariate_ax, kde_emp.x, kde_emp.density; color=:steelblue, linewidth=2.5, label="Empirical")
-    lines!(univariate_ax, kde_gen.x, kde_gen.density; color=:tomato, linewidth=2.5, linestyle=:dash, label="Generated")
-    axislegend(univariate_ax; position=:rt, framevisible=true, backgroundcolor=:white, labelsize=28)
-
-    # --- Latent joint densities ---------------------------------------------
-    pair_consec = size(X, 1) >= 2 ? (1, 2) : nothing
-    pair_skip = size(X, 1) >= 3 ? (1, 3) : nothing
-
-    function latent_density_grid(data::AbstractMatrix, pair)
-        pair === nothing && return nothing
-        i, j = pair
-        if i > size(data, 1) || j > size(data, 1)
-            return nothing
-        end
-        x_vals = vec(@view data[i, :])
-        y_vals = vec(@view data[j, :])
-        x_min, x_max = extrema(x_vals)
-        y_min, y_max = extrema(y_vals)
-        if x_min == x_max || y_min == y_max
-            return nothing
-        end
-        nbins = clamp(Int(round(sqrt(length(x_vals)) / 2)), 40, 120)
-        x_edges = range(x_min, x_max; length=nbins + 1)
-        y_edges = range(y_min, y_max; length=nbins + 1)
-        density = zeros(Float64, nbins, nbins)
-        valid = 0
-        for idx in eachindex(x_vals)
-            xv = x_vals[idx]
-            yv = y_vals[idx]
-            if !isfinite(xv) || !isfinite(yv)
-                continue
-            end
-            xi = clamp(searchsortedlast(x_edges, xv), 1, nbins)
-            yi = clamp(searchsortedlast(y_edges, yv), 1, nbins)
-            density[yi, xi] += 1
-            valid += 1
-        end
-        dx = x_edges[2] - x_edges[1]
-        dy = y_edges[2] - y_edges[1]
-        area = dx * dy
-        if area == 0 || valid == 0
-            return nothing
-        end
-        density ./= (valid * area)
-        x_centers = 0.5 .* (x_edges[1:end-1] .+ x_edges[2:end])
-        y_centers = 0.5 .* (y_edges[1:end-1] .+ y_edges[2:end])
-        return (x_centers, y_centers, density)
-    end
-
-    emp_consec = latent_density_grid(X, pair_consec)
-    gen_consec = latent_density_grid(X_gen, pair_consec)
-    emp_skip = latent_density_grid(X, pair_skip)
-    gen_skip = latent_density_grid(X_gen, pair_skip)
-
-    densities = Float64[]
-    for grid in (emp_consec, gen_consec, emp_skip, gen_skip)
-        grid === nothing && continue
-        push!(densities, maximum(grid[3]))
-    end
-    density_max = isempty(densities) ? 1.0 : maximum(densities)
-
-    heatmap_axes = [
-        Axis(right_panel[1, 1]; titlesize=36, xlabelsize=32, ylabelsize=32),
-        Axis(right_panel[1, 2]; titlesize=36, xlabelsize=32, ylabelsize=32),
-        Axis(right_panel[2, 1]; titlesize=36, xlabelsize=32, ylabelsize=32),
-        Axis(right_panel[2, 2]; titlesize=36, xlabelsize=32, ylabelsize=32),
-    ]
-
-    heatmap_info = [
-        (heatmap_axes[1], emp_consec, pair_consec, "Empirical"),
-        (heatmap_axes[2], gen_consec, pair_consec, "Generated"),
-        (heatmap_axes[3], emp_skip, pair_skip, "Empirical"),
-        (heatmap_axes[4], gen_skip, pair_skip, "Generated"),
-    ]
-
-    density_max = max(density_max, eps(Float64))
-
-    for (ax, grid, pair, label) in heatmap_info
-        if grid === nothing || pair === nothing
-            hidespines!(ax)
-            hideticks!(ax)
-            text!(ax, 0.5, 0.5, text="Insufficient modes", align=(:center, :center), color=:gray, fontsize=28)
-        else
-            i, j = pair
-            ax.title = @sprintf("%s latent (%d,%d)", label, i, j)
-            ax.xlabel = @sprintf("Mode %d", i)
-            ax.ylabel = @sprintf("Mode %d", j)
-            x_grid, y_grid, density_grid = grid
-            CairoMakie.heatmap!(ax, x_grid, y_grid, density_grid; colormap=:viridis, colorrange=(0, density_max))
-        end
-    end
-
-    Colorbar(fig[2:3, 4]; limits=(0, density_max), colormap=:viridis, ticklabelsize=28, width=30)
-
-    # --- Layout tuning -------------------------------------------------------
-    colgap!(main_layout, 15)
-    rowgap!(main_layout, 15)
-    colgap!(right_panel, 15)
-    rowgap!(right_panel, 15)
-    colgap!(time_panel, 15)
-
-    rowsize!(main_layout, 1, Relative(0.3))
-    rowsize!(main_layout, 2, Relative(0.35))
-    rowsize!(main_layout, 3, Relative(0.35))
-
-    subtitle = @sprintf("KL = %.4f | modes=%d | stride=%d | clusters=%d", rel_ent, mode_count, stride_tag, clusters_tag)
-    Label(fig[0, 1:3], text=subtitle, fontsize=34, font=:bold)
-
-    CairoMakie.save(fig_path, fig)
+    savefig(fig, fig_path)
     @info "Saved diagnostics figure" path=fig_path
 
-    return fig_path, nothing
+    mode_count = size(Xn, 1)
+    modes_path_saved = nothing
+    if mode_count > 0
+        ncols = clamp(mode_count <= 6 ? mode_count : ceil(Int, sqrt(mode_count)), 1, 6)
+        nrows = ceil(Int, mode_count / ncols)
+        fig_width = max(900, 350 * ncols)
+        fig_height = max(400, 280 * nrows)
+        fig_modes = plot(layout=(nrows, ncols), size=(fig_width, fig_height))
+        for mode_idx in 1:mode_count
+            kde_mode_emp = kde(vec(@view Xn[mode_idx, :]))
+            kde_mode_gen = kde(vec(@view X_gen_n[mode_idx, :]))
+            axis = fig_modes[mode_idx]
+            plot!(axis, kde_mode_emp.x, kde_mode_emp.density;
+                label="empirical", color=:steelblue, lw=2, legend=:topright)
+            plot!(axis, kde_mode_gen.x, kde_mode_gen.density;
+                label="generated", color=:tomato, lw=2, linestyle=:dash)
+            xlabel!(axis, "Normalized coordinate $(mode_idx)")
+            ylabel!(axis, "Density")
+        end
+        total_axes = nrows * ncols
+        if total_axes > mode_count
+            dummy_x = [NaN]
+            dummy_y = [NaN]
+            for extra in (mode_count + 1):total_axes
+                plot!(fig_modes[extra], dummy_x, dummy_y; legend=false, framestyle=:none)
+            end
+        end
+        savefig(fig_modes, fig_modes_path)
+        @info "Saved per-mode PDF figure" path=fig_modes_path panels=mode_count
+        modes_path_saved = fig_modes_path
+    end
+    return fig_path, modes_path_saved
 end
 
 """
@@ -732,9 +741,8 @@ nx, n_snapshots = size(data)
 mean_field = vec(mean(data; dims=2))
 data_centered = data .- mean_field
 
-coords, retained_indices = select_modes(data_centered, cfg.n_modes)
-latent_dim = size(coords, 1)
-@info "Selected modes" stride=cfg.n_modes latent_dim=latent_dim
+fourier_matrix = fourier_real_matrix(data_centered)
+basis, coords, fourier_mean, explained = compute_pca(fourier_matrix, cfg.modes)
 
 # Normalize using FULL coords to get correct statistics
 Xn_full, means, stds = normalize_data(coords, cfg.normalize_mode)
@@ -745,14 +753,15 @@ if cfg.train_max > 0 && size(Xn_full, 2) > cfg.train_max
 else
     Xn = Xn_full
 end
-@info "Training score model" latent_dim=latent_dim epochs=cfg.n_epochs batch_size=cfg.batch_size train_samples=size(Xn,2) total_samples=size(coords,2) train_copies=cfg.train_copies
+@info "Training score model" modes=cfg.modes epochs=cfg.n_epochs batch_size=cfg.batch_size train_samples=size(Xn,2) total_samples=size(coords,2) train_copies=cfg.train_copies
 nn, losses, kgmm_res = train_score_model(Xn, cfg)
 final_loss = isempty(losses) ? NaN : losses[end]
 @info "Training completed" final_loss
 cluster_count = kgmm_res === nothing ? 0 : get(kgmm_res, :Nc, length(get(kgmm_res, :counts, Int[])))
 @info "kgmm cluster count" clusters=cluster_count
 
-samples_n = sample_langevin(latent_dim, nn, cfg)
+samples_n = sample_langevin(cfg.modes, nn, cfg)
+
 # kde_Xn = kde(Xn')
 # kde_samples_n = kde(samples_n')
 # plt1 = heatmap(kde_Xn.x, kde_Xn.y, kde_Xn.density; label="latent coords",
@@ -764,32 +773,36 @@ samples_n = sample_langevin(latent_dim, nn, cfg)
 samples_n = select_subset(samples_n, cfg.sample_keep)
 X_gen_n = samples_n
 X_gen = unnormalize_data(X_gen_n, means, stds)
+X_gen
+fields_gen = reconstruct_fields(X_gen, basis, fourier_mean, nx, mean_field)
+fields_rec = reconstruct_fields(coords, basis, fourier_mean, nx, mean_field)
 
-generated_subset = assemble_physical_subset(X_gen, mean_field, retained_indices)
-empirical_subset = data[retained_indices, :]
-
-pdf_emp_samples = collect_for_kde(empirical_subset, cfg.kde_max_samples)
-pdf_gen_samples = collect_for_kde(generated_subset, cfg.kde_max_samples)
+pdf_emp_samples = collect_for_kde(data, cfg.kde_max_samples)
+pdf_rec_samples = collect_for_kde(fields_rec, cfg.kde_max_samples)
+pdf_gen_samples = collect_for_kde(fields_gen, cfg.kde_max_samples)
 @info "PDF sample counts (post-thinning)" empirical=length(pdf_emp_samples) generated=length(pdf_gen_samples)
 
-obs_pos = 1
-observable_idx = retained_indices[obs_pos]
-series_emp = vec(empirical_subset[obs_pos, :])
-series_gen = vec(generated_subset[obs_pos, :])
+observable_idx = ensure_observable_index(cfg.observable_index, nx)
+series_emp = vec(data[observable_idx, :])
+series_rec = vec(fields_rec[observable_idx, :])
+series_gen = vec(fields_gen[observable_idx, :])
 
 kde_emp = kde(pdf_emp_samples)
+kde_rec = kde(pdf_rec_samples)
 kde_gen = kde(pdf_gen_samples)
 rel_ent = ScoreEstimation.relative_entropy(pdf_emp_samples, pdf_gen_samples; npoints=cfg.rel_entropy_points)
 @info "Relative entropy" rel_ent
 
-analysis_fig_path, modes_fig_path = build_plot(series_emp, series_gen, coords, X_gen,
-    kde_emp, kde_gen, rel_ent, cfg, cluster_count, delta_t, observable_idx)
+analysis_fig_path, modes_fig_path = build_plot(series_emp, series_rec, series_gen, coords, X_gen,
+    Xn_full, X_gen_n,
+    kde_emp, kde_rec, kde_gen, rel_ent, cfg, cluster_count)
 
 result_kwargs = (
     Xn = Float32.(Xn_full),
     X_gen_n = Float32.(X_gen_n),
+    basis = basis,
+    fourier_mean = fourier_mean,
     mean_field = mean_field,
-    selected_indices = retained_indices,
     reduced_means = means,
     reduced_stds = stds,
     train_losses = losses,
@@ -810,20 +823,24 @@ result_kwargs = (
     langevin_ens = cfg.langevin_ens,
     langevin_burnin = cfg.langevin_burnin,
     series_emp = series_emp,
+    series_reconstructed = series_rec,
     series_gen = series_gen,
     pdf_emp_sample_count = length(pdf_emp_samples),
+    pdf_reconstructed_sample_count = length(pdf_rec_samples),
     pdf_generated_sample_count = length(pdf_gen_samples),
     kde_max_samples = cfg.kde_max_samples,
     kde_emp_x = collect(kde_emp.x),
     kde_emp_density = kde_emp.density,
+    kde_rec_x = collect(kde_rec.x),
+    kde_rec_density = kde_rec.density,
     kde_gen_x = collect(kde_gen.x),
     kde_gen_density = kde_gen.density,
     relative_entropy = rel_ent,
-    mode_stride = cfg.n_modes,
-    latent_dimension = latent_dim,
+    explained_variance = explained,
     data_stride = cfg.stride,
     max_snapshots = cfg.max_snapshots,
     sample_keep = cfg.sample_keep,
+    observable_index = observable_idx,
     delta_t = delta_t === nothing ? nothing : [delta_t],
     normalization_mode = String(cfg.normalize_mode),
     train_copies = cfg.train_copies,
@@ -831,12 +848,3 @@ result_kwargs = (
     modes_figure_path = modes_fig_path === nothing ? "" : modes_fig_path,
 )
 save_results(KS_OUTPUT_H5; result_kwargs...)
-
-##
-
-using Plots
-
-kde_Xn = kde(Xn[16,:])
-
-Plots.plot(kde_Xn.x, kde_Xn.density; label="latent coords",
-   title="KDE of first spatial point", xlabel="u(x=1)", ylabel="density")
