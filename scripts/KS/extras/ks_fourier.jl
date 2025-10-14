@@ -429,12 +429,22 @@ end
     create_batched_drift_nn(nn, σ)
 
 Wrap the ε-network into a FastSDE-compatible drift. The conversion to Float32
-matches the training precision; we reuse a cached buffer to avoid allocating in
-the tight Langevin loop.
+matches the training precision; we reuse a per-thread cached buffer to avoid
+allocating in the tight Langevin loop.
 """
 function create_batched_drift_nn(nn, sigma::Real)
-    buf_ref = Ref(Matrix{Float32}(undef, 0, 0))
     inv_sigma = 1.0 / Float64(sigma)
+    buf_store = [Matrix{Float32}(undef, 0, 0) for _ in 1:Threads.nthreads()]
+
+    @inline function get_buffer(dim::Int, ncols::Int)
+        tid = Threads.threadid()
+        buf = buf_store[tid]
+        if size(buf, 1) != dim || size(buf, 2) != ncols
+            buf = Matrix{Float32}(undef, dim, ncols)
+            buf_store[tid] = buf
+        end
+        return buf
+    end
 
     function drift_batched!(DU, U, p, t)
         if U isa AbstractVector
@@ -444,11 +454,7 @@ function create_batched_drift_nn(nn, sigma::Real)
             dim, ncols = size(U)
         end
 
-        buf = buf_ref[]
-        if size(buf, 1) != dim || size(buf, 2) != ncols
-            buf = Matrix{Float32}(undef, dim, ncols)
-            buf_ref[] = buf
-        end
+        buf = get_buffer(dim, ncols)
 
         if U isa AbstractVector
             @inbounds for i in 1:dim

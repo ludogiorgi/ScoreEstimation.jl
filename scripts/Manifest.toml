@@ -1,6 +1,6 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.11.7"
+julia_version = "1.11.3"
 manifest_format = "2.0"
 project_hash = "ff2fefb0837fcf34e835abf75d062ab335c2521a"
 
@@ -1920,7 +1920,7 @@ version = "3.2.4+0"
 [[deps.OpenLibm_jll]]
 deps = ["Artifacts", "Libdl"]
 uuid = "05823500-19ac-5b8b-9628-191a04bc5112"
-version = "0.8.5+0"
+version = "0.8.1+2"
 
 [[deps.OpenMPI_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "Hwloc_jll", "JLLWrappers", "LazyArtifacts", "Libdl", "MPIPreferences", "TOML", "Zlib_jll"]
@@ -2425,7 +2425,7 @@ version = "1.5.0"
 
 [[deps.ScoreEstimation]]
 deps = ["BSON", "CUDA", "Colors", "FastSDE", "Flux", "GLMakie", "HDF5", "KernelDensity", "LinearAlgebra", "MarkovChainHammer", "ProgressMeter", "QuadGK", "Random", "Revise", "StateSpacePartitions", "Statistics"]
-path = "/Users/ludovico/Library/CloudStorage/OneDrive-MassachusettsInstituteofTechnology/Documents/JuliaProjects/ScoreEstimation.jl"
+path = "/data2/ludovico/ScoreEstimation.jl"
 uuid = "8d73b47c-4136-4c8d-8aae-21cdc18f4aee"
 version = "0.1.0"
 
