@@ -56,7 +56,7 @@ h5open(joinpath(REDUCED_DATA_DIR, "reduced_performances.h5"), "r") do file
     fig1 = Figure(size=(900, 700))
     ax1 = Axis(fig1[1, 1],
         xlabel = "Training time (s)",
-        ylabel = "Relative entropy D_KL(p_true || p_NN)",
+        ylabel = "Relative entropy",
         title = "Score Estimation Performance:\nPreprocessing Comparison",
         xscale = log10,
         yscale = log10,
@@ -69,7 +69,7 @@ h5open(joinpath(REDUCED_DATA_DIR, "reduced_performances.h5"), "r") do file
         color = color_nopreproc,
         strokewidth = 1.5,
         strokecolor = :black,
-        label = "No preprocessing")
+    label = "Without KGMM")
 
     lines!(ax1, train_times_no_pre, rel_ent_no_pre,
         color = (color_nopreproc, 0.5),
@@ -82,7 +82,7 @@ h5open(joinpath(REDUCED_DATA_DIR, "reduced_performances.h5"), "r") do file
         color = color_preproc,
         strokewidth = 1.5,
         strokecolor = :black,
-        label = "With preprocessing (GMM)")
+    label = "With KGMM")
 
     lines!(ax1, train_times_pre, rel_ent_pre,
         color = (color_preproc, 0.5),
@@ -90,7 +90,8 @@ h5open(joinpath(REDUCED_DATA_DIR, "reduced_performances.h5"), "r") do file
         linestyle = :solid)
 
     # Add legend
-    Legend(fig1[1, 2], ax1, framevisible = true, labelsize = 14)
+    Legend(fig1[2, 1], ax1, orientation = :horizontal, valign = :bottom, halign = :center,
+        framevisible = true, labelsize = 14)
 
     # Save figure
     save(joinpath(REDUCED_PUB_DIR, "reduced_performance_comparison.png"), fig1, px_per_unit=2)

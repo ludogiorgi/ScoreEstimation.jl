@@ -10,6 +10,10 @@ using Flux
 using HDF5
 using Random
 using KernelDensity
+using LinearAlgebra
+
+# Show thread count so users see when the script is running multi-threaded
+@info "Threading status" n_threads=Threads.nthreads()
 
 const REDUCED_ROOT = @__DIR__
 const REDUCED_FIGURES_DIR = joinpath(REDUCED_ROOT, "figures")
@@ -89,7 +93,7 @@ resolution = 100
 initial_state = zeros(dim)
 
 obs_nn = evolve(initial_state, dt, n_steps, drift_reduced!, diffusion_reduced!;
-                n_burnin=1000, timestepper=:euler, resolution=resolution, sigma_inplace=true, n_ens=100, boundary=(-10,10))
+                timestepper=:euler, resolution=resolution, sigma_inplace=true, n_ens=100, boundary=(-10,10))
 
 @info "Trajectory shape" size(obs_nn)
 
@@ -107,7 +111,7 @@ score_true_norm_scalar(x::Real) = score_true_normalized(x, mean_obs, std_obs)
 Sample using FastSDE.evolve with drift = score and diffusion = sqrt(2) (normalized space).
 If `nn` and `sigma` are provided, uses batched drift for faster ensemble integration with neural networks.
 """
-function generate_langevin_samples(score_scalar_fn; dt, n_steps, resolution, n_ens, boundary=(-10,10), nn=nothing, sigma=nothing)
+function generate_langevin_samples(score_scalar_fn; dt, n_steps, resolution, n_ens, boundary=(-10,10), nn=nothing, sigma=nothing, burnin=1000)
     # Decide if we should use batched mode (only makes sense if an NN is provided AND n_ens > 1)
     use_batched = !isnothing(nn) && !isnothing(sigma)
     if use_batched && n_ens == 1
@@ -124,11 +128,28 @@ function generate_langevin_samples(score_scalar_fn; dt, n_steps, resolution, n_e
         samples = evolve([0.0], dt, n_steps, drift_batched!, sigma_constant;
                           timestepper=:euler,
                           resolution=resolution,
-                          n_burnin=1000,
                           n_ens=n_ens,
                           boundary=boundary,
-                          batched_drift=true,
+                          flatten=true,
                           manage_blas_threads=true)
+        samples_mat = Array(samples)
+        snapshots_per_traj = div(n_steps, resolution) + 1
+        burnin_snapshots = ceil(Int, burnin / resolution)
+        drop_snapshots_per_traj = min(snapshots_per_traj, burnin_snapshots + 1)
+        keep_indices = Int[]
+        for ens_idx in 0:(n_ens - 1)
+            traj_start = ens_idx * snapshots_per_traj + 1
+            keep_start = traj_start + drop_snapshots_per_traj
+            keep_end = (ens_idx + 1) * snapshots_per_traj
+            if keep_start <= keep_end
+                append!(keep_indices, keep_start:keep_end)
+            end
+        end
+        if isempty(keep_indices)
+            @warn "All samples removed during burn-in" burnin_snapshots drop_snapshots_per_traj snapshots_per_traj
+            return Float64[]
+        end
+        return vec(samples_mat[:, keep_indices])
     else
         # Non-batched mode for scalar functions
         function drift!(du, u, t)
@@ -142,14 +163,30 @@ function generate_langevin_samples(score_scalar_fn; dt, n_steps, resolution, n_e
         samples = evolve([0.0], dt, n_steps, drift!, unit_diffusion!;
                          timestepper=:euler,
                          resolution=resolution,
-                         n_burnin=1000,
                          sigma_inplace=true,
                          n_ens=n_ens,
                          boundary=boundary,
-                         batched_drift=false,
+                         flatten=true,
                          manage_blas_threads=false)
+        samples_mat = Array(samples)
+        snapshots_per_traj = div(n_steps, resolution) + 1
+        burnin_snapshots = ceil(Int, burnin / resolution)
+        drop_snapshots_per_traj = min(snapshots_per_traj, burnin_snapshots + 1)
+        keep_indices = Int[]
+        for ens_idx in 0:(n_ens - 1)
+            traj_start = ens_idx * snapshots_per_traj + 1
+            keep_start = traj_start + drop_snapshots_per_traj
+            keep_end = (ens_idx + 1) * snapshots_per_traj
+            if keep_start <= keep_end
+                append!(keep_indices, keep_start:keep_end)
+            end
+        end
+        if isempty(keep_indices)
+            @warn "All samples removed during burn-in" burnin_snapshots drop_snapshots_per_traj snapshots_per_traj
+            return Float64[]
+        end
+        return vec(samples_mat[:, keep_indices])
     end
-    return vec(samples)
 end
 
 Random.seed!(42)
@@ -189,19 +226,63 @@ function score_nn_physical(x_phys::Real, nn, sigma, mean_obs, std_obs)
 end
 
 # Batched drift function for neural network score
-function create_batched_drift_nn(nn, sigma)
-    # Primary 4-arg method (DU,U,p,t)
+function create_batched_drift_nn(nn, sigma::Real)
+    inv_sigma = 1.0 / Float64(sigma)
+    buf_store = [Matrix{Float32}(undef, 0, 0) for _ in 1:Threads.nthreads()]
+
+    @inline function get_buffer(dim::Int, ncols::Int)
+        tid = Threads.threadid()
+        buf = buf_store[tid]
+        if size(buf, 1) != dim || size(buf, 2) != ncols
+            buf = Matrix{Float32}(undef, dim, ncols)
+            buf_store[tid] = buf
+        end
+        return buf
+    end
+
     function drift_batched!(DU, U, p, t)
-        U_f32 = Float32.(U)          # U: (1, n_ens)
-        Y = nn(U_f32)                # same shape
-        DU .= -Float64.(Y) ./ Float64(sigma)
+        if U isa AbstractVector
+            dim = length(U)
+            ncols = 1
+        else
+            dim, ncols = size(U)
+        end
+
+        buf = get_buffer(dim, ncols)
+
+        if U isa AbstractVector
+            @inbounds for i in 1:dim
+                buf[i, 1] = Float32(U[i])
+            end
+        else
+            @inbounds for j in 1:ncols
+                for i in 1:dim
+                    buf[i, j] = Float32(U[i, j])
+                end
+            end
+        end
+
+        Y = nn(buf)
+
+        if DU isa AbstractVector
+            @inbounds for i in 1:dim
+                DU[i] = -Float64(Y[i, 1]) * inv_sigma
+            end
+        else
+            @inbounds for j in 1:ncols
+                for i in 1:dim
+                    DU[i, j] = -Float64(Y[i, j]) * inv_sigma
+                end
+            end
+        end
         return nothing
     end
-    # 3-arg fallback used by static path probes (DU,U,t)
+
     function drift_batched!(DU, U, t)
         drift_batched!(DU, U, nothing, t)
         return nothing
     end
+
     return drift_batched!
 end
 

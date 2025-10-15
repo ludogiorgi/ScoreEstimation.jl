@@ -50,7 +50,7 @@ using Statistics
 const KS_ROOT = @__DIR__
 const KS_DATA_DIR = joinpath(KS_ROOT, "data")
 const KS_RUNS_DIR = joinpath(KS_ROOT, "runs")
-const KS_DATAFILE = joinpath(KS_DATA_DIR, "new_ks.hdf5")
+const KS_DATAFILE = joinpath(KS_DATA_DIR, "ks_new.hdf5")
 const KS_OUTPUT_H5 = joinpath(KS_DATA_DIR, "ks_results.h5")
 
 CairoMakie.activate!()
@@ -126,7 +126,7 @@ function build_config()
     getfloat(key, default) = parse(Float64, get(args, key, string(default)))
     getbool(key; default=false) = get(args, key, default ? "true" : "false") == "true"
 
-    stride = getint("stride", 2)                             # Temporal subsampling interval when reading KS data
+    stride = getint("stride", 10)                             # Temporal subsampling interval when reading KS data
     max_snapshots = getint("max-snapshots", 0)               # Hard cap on temporal snapshots (0 = no cap)
     n_modes = getint("n-modes", 8)                           # Spatial stride for mode subsampling (1 = keep all grid points)
     seed = getint("seed", 2024)                              # RNG seed for reproducibility
@@ -138,7 +138,7 @@ function build_config()
     lr = getfloat("lr", 1e-3)                                # Learning rate for Adam optimizer
 
     prob = getfloat("prob", 1e-4)                            # kgmm: probability threshold for cluster pruning / weighting
-    conv_param = getfloat("conv-param", 5e-3)                # kgmm: convergence tolerance
+    conv_param = getfloat("conv-param", 1e-3)                # kgmm: convergence tolerance
     i_max = getint("imax", 120)                              # kgmm: max iterations
     show_progress = getbool("show-progress")                 # Verbose kgmm progress display toggle
     kgmm_kwargs = (prob=prob, conv_param=conv_param, i_max=i_max, show_progress=show_progress)
