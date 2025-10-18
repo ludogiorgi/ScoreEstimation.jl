@@ -190,7 +190,7 @@ function generate_langevin_samples(score_scalar_fn; dt, n_steps, resolution, n_e
 end
 
 Random.seed!(42)
-dt_gen = 0.005
+dt_gen = 0.0025
 n_steps_gen = 100_000
 resolution_gen = 200
 n_ens_gen = 100  # increased for more stable KL estimates
@@ -283,7 +283,10 @@ end
 
 function train_without_preprocessing(obs, epochs; sigma, neurons, batch_size, lr, seed,
                                      nn_prev=nothing, cumulative_time=0.0, opt_state_prev=nothing)
-    Random.seed!(seed)
+    # Only set seed if starting fresh training (no previous network)
+    if isnothing(nn_prev)
+        Random.seed!(seed)
+    end
     nn = nothing; losses = nothing; opt_state = nothing
     elapsed = @elapsed begin
         nn, losses, _, _, _, _, opt_state = ScoreEstimation.train(
@@ -329,14 +332,15 @@ function train_with_preprocessing(obs, epochs, prob;
 end
 
 # ---------------- Experiment configuration ----------------
-sigma_value = 0.05
+sigma_value = 0.05  # Increased from 0.05 for more stable training
 neurons = [100, 50]
-batch_size = 16
+batch_size_no_pre = 64  # Larger batch size for preprocessing=false for more stable gradients
+batch_size_pre = 8    # Smaller batch size for preprocessing=true (with KGMM)
 lr = 1e-3
 
 epochs_schedule = [10:10:100...]
 prob_schedule = [0.01:-0.001:0.002...]
-preprocessing_epochs = 1000
+preprocessing_epochs = 200
 
 Plots.gr()
 mkpath(REDUCED_FIGURES_DIR)
@@ -347,7 +351,7 @@ mkpath(REDUCED_SCORE_PDFS_DIR)
 train_without_preprocessing(obs_uncorr, 1;
     sigma=sigma_value,
     neurons=neurons,
-    batch_size=batch_size,
+    batch_size=batch_size_no_pre,
     lr=lr,
     seed=9999)
 
@@ -355,7 +359,7 @@ train_without_preprocessing(obs_uncorr, 1;
 train_with_preprocessing(obs_uncorr, 1, prob_schedule[1];
     sigma=sigma_value,
     neurons=neurons,
-    batch_size=batch_size,
+    batch_size=batch_size_pre,
     lr=lr,
     seed=19_999)
 
@@ -367,45 +371,86 @@ const PreResult   = NamedTuple{(:clusters,:clusters_actual,:prob,:train_time,:re
 results_no_pre = NoPreResult[]
 results_pre    = PreResult[]
 
+# ---------------- Efficient training for preprocessing=false ----------------
+# Train once for maximum epochs and save checkpoints at each delta_epoch
+@info "Training without preprocessing for $(maximum(epochs_schedule)) epochs with checkpoints"
+delta_epoch = epochs_schedule[2] - epochs_schedule[1]  # Assuming uniform spacing
+max_epochs = maximum(epochs_schedule)
+seed = 10_000
 
-prev_nn = nothing
-prev_opt_state = nothing
-cumulative_time_no_pre = 0.0
-for (i, epochs) in enumerate(epochs_schedule)
-    global prev_nn, prev_opt_state, cumulative_time_no_pre
-    seed = 10_000 + i # fixed seed for consistent incremental training
-    prev_nn, losses, cumulative_time_no_pre, prev_opt_state = train_without_preprocessing(obs_uncorr, epochs;
+# Train incrementally, saving checkpoints at specified intervals
+nn_current = nothing
+opt_state = nothing
+cumulative_time = 0.0
+all_losses = Float64[]
+
+for (i, target_epochs) in enumerate(epochs_schedule)
+    prev_epochs = i > 1 ? epochs_schedule[i-1] : 0
+    epochs_to_train = target_epochs - prev_epochs
+    
+    # Train for the next batch of epochs
+    # Seed is only set on the first call (when nn_prev is nothing)
+    nn_current, losses, elapsed, opt_state = train_without_preprocessing(obs_uncorr, epochs_to_train;
         sigma=sigma_value,
         neurons=neurons,
-        batch_size=batch_size,
+        batch_size=batch_size_no_pre,
         lr=lr,
         seed=seed,
-        nn_prev=prev_nn,
-        cumulative_time=cumulative_time_no_pre,
-        opt_state_prev=prev_opt_state)
-    nn = prev_nn
-    t_train = cumulative_time_no_pre
-    score_fn = score_from_nn_scalar(nn, sigma_value)
+        nn_prev=nn_current,
+        cumulative_time=0.0,
+        opt_state_prev=opt_state)
+    
+    cumulative_time += elapsed
+    append!(all_losses, losses)
+    
+    # Evaluate at this checkpoint
+    score_fn = score_from_nn_scalar(nn_current, sigma_value)
     Random.seed!(111_111)
     samples_nn = generate_langevin_samples(score_fn;
         dt=dt_gen,
         n_steps=n_steps_gen,
         resolution=resolution_gen,
         n_ens=n_ens_gen,
-        nn=nn,
+        nn=nn_current,
         sigma=sigma_value)
     rel_ent = ScoreEstimation.relative_entropy(true_samples, samples_nn; npoints=REL_ENT_POINTS)
-    push!(results_no_pre, (epochs=epochs, train_time=t_train, relative_entropy=rel_ent, final_loss=losses[end]))
+    push!(results_no_pre, (epochs=target_epochs, train_time=cumulative_time, relative_entropy=rel_ent, final_loss=all_losses[end]))
+    
+    # Save score and PDF comparison plot with loss history
+    if !isempty(samples_nn)
+        kde_nn = kde(samples_nn)
+        fig = Plots.plot(layout=(1, 2), size=(1200, 400))
+        
+        # Panel 1: KDE comparison
+        Plots.plot!(fig[1, 1], kde_true.x, kde_true.density;
+            label="True distribution", linewidth=2, color=:steelblue,
+            xlabel="x (normalized)", ylabel="density",
+            title="No preprocessing: epochs=$(target_epochs)")
+        Plots.plot!(fig[1, 1], kde_nn.x, kde_nn.density;
+            label="NN sample", linewidth=2, linestyle=:dash, color=:darkorange)
+        
+        # Panel 2: Cumulative loss history
+        Plots.plot!(fig[1, 2], all_losses;
+            xlabel="Training epoch", ylabel="Loss",
+            title="Loss function vs training epochs",
+            linewidth=2, color=:steelblue, label="")
+        
+        pdf_path = joinpath(REDUCED_SCORE_PDFS_DIR, "no_pre_epochs_$(lpad(target_epochs, 3, '0')).png")
+        Plots.savefig(fig, pdf_path)
+    end
+    
     GC.gc()
-    @info "preprocessing=false" epochs=epochs train_time=t_train relative_entropy=rel_ent
+    @info "preprocessing=false checkpoint" epochs=target_epochs train_time=cumulative_time relative_entropy=rel_ent
 end
 
+
 for (i, prob) in enumerate(prob_schedule)
+    # Use different seed for each independent training run
     seed = 20_000 + i
     nn, losses, t_train, nc_actual, prob_used = train_with_preprocessing(obs_uncorr, preprocessing_epochs, prob;
         sigma=sigma_value,
         neurons=neurons,
-        batch_size=batch_size,
+        batch_size=batch_size_pre,
         lr=lr,
         seed=seed)
     score_fn = score_from_nn_scalar(nn, sigma_value)
@@ -419,6 +464,30 @@ for (i, prob) in enumerate(prob_schedule)
         sigma=sigma_value)
     rel_ent = ScoreEstimation.relative_entropy(true_samples, samples_nn; npoints=REL_ENT_POINTS)
     push!(results_pre, (clusters=nc_actual, clusters_actual=nc_actual, prob=prob_used, train_time=t_train, relative_entropy=rel_ent, final_loss=losses[end]))
+    
+    # Save score and PDF comparison plot with loss history
+    if !isempty(samples_nn)
+        kde_nn = kde(samples_nn)
+        fig = Plots.plot(layout=(1, 2), size=(1200, 400))
+        
+        # Panel 1: KDE comparison
+        Plots.plot!(fig[1, 1], kde_true.x, kde_true.density;
+            label="True distribution", linewidth=2, color=:steelblue,
+            xlabel="x (normalized)", ylabel="density",
+            title="KGMM preprocessing: prob=$(prob_used), clusters=$(nc_actual)")
+        Plots.plot!(fig[1, 1], kde_nn.x, kde_nn.density;
+            label="NN sample", linewidth=2, linestyle=:dash, color=:darkorange)
+        
+        # Panel 2: Loss history for this training run
+        Plots.plot!(fig[1, 2], losses;
+            xlabel="Training epoch", ylabel="Loss",
+            title="Loss function vs training epochs",
+            linewidth=2, color=:darkorange, label="")
+        
+        pdf_path = joinpath(REDUCED_SCORE_PDFS_DIR, "pre_prob_$(lpad(round(Int, prob_used*1000), 3, '0')).png")
+        Plots.savefig(fig, pdf_path)
+    end
+    
     GC.gc()
     @info "preprocessing=true" clusters=nc_actual train_time=t_train relative_entropy=rel_ent
 end

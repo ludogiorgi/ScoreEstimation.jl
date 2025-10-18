@@ -79,11 +79,11 @@ Random.seed!(1234)
 
 dim = 3
 dt = cli_float("dt", 0.01)
-default_steps = cli_int("n-steps", 10_000_000)
+default_steps = cli_int("n-steps", 100_000)
 quick_mode = cli_bool("quick"; default=false)
 n_steps = quick_mode ? min(default_steps, 20_000) : default_steps
-resolution = cli_int("resolution", quick_mode ? 20 : 10)
-raw_ensemble = cli_int("n-ens-data", 1)
+resolution = cli_int("resolution", quick_mode ? 20 : 100)
+raw_ensemble = cli_int("n-ens-data", 100)
 n_ens_data = max(raw_ensemble, 1)
 boundary_radius = cli_float("boundary", 100.0)
 if quick_mode
@@ -109,13 +109,21 @@ for i in 1:dim
 end
 
 obs = (obs_nn .- mean_obs) ./ std_obs
-obs_uncorr = obs
+obs_full = obs
 
 if quick_mode
-    max_samples = min(size(obs_uncorr, 2), cli_int("quick-max-samples", 6000))
-    obs_uncorr = obs_uncorr[:, 1:max_samples]
-    @info "Quick mode truncating training samples" n_samples=size(obs_uncorr, 2)
+    max_samples = min(size(obs_full, 2), cli_int("quick-max-samples", 6000))
+    obs_full = obs_full[:, 1:max_samples]
+    @info "Quick mode data limit applied" max_samples=max_samples final_shape=size(obs_full)
 end
+
+# Split into training (80%) and test (20%) sets for proper evaluation
+n_total = size(obs_full, 2)
+n_train = round(Int, 0.8 * n_total)
+@info "Data split" total_samples=n_total train_samples=n_train test_samples=(n_total-n_train)
+
+obs_uncorr = obs_full[:, 1:n_train]  # Training data
+obs_test = obs_full[:, (n_train+1):end]  # Test data (held out)
 
 # -----------------------------------------------------------------------------
 # Langevin helpers
@@ -218,7 +226,10 @@ end
 # -----------------------------------------------------------------------------
 function train_without_preprocessing(obs, epochs; sigma, neurons, batch_size, lr, seed,
                                      nn_prev=nothing, cumulative_time=0.0, opt_state_prev=nothing)
-    Random.seed!(seed)
+    # Only set seed if starting fresh training (no previous network)
+    if isnothing(nn_prev)
+        Random.seed!(seed)
+    end
     nn = nothing; losses = nothing; opt_state = nothing
     elapsed = @elapsed begin
         nn, losses, _, _, _, _, opt_state = ScoreEstimation.train(
@@ -266,12 +277,13 @@ end
 # -----------------------------------------------------------------------------
 # Experiment configuration
 # -----------------------------------------------------------------------------
-sigma_value = cli_float("sigma", 0.05)
-neurons = [128, 64]
-batch_size = cli_int("batch-size", quick_mode ? 16 : 32)
-lr = cli_float("lr", 5e-4)
+sigma_value = cli_float("sigma", 0.08)
+neurons = [100, 50]
+batch_size_no_pre = cli_int("batch-size-no-pre", quick_mode ? 32 : 128)  # Larger batch for preprocessing=false
+batch_size_pre = cli_int("batch-size-pre", quick_mode ? 16 : 32)       # Smaller batch for preprocessing=true
+lr = cli_float("lr", 1e-3)
 
-default_epochs = quick_mode ? collect(10:10:40) : collect(200:200:1_000)
+default_epochs = quick_mode ? collect(10:10:40) : collect(10:10:100)
 epochs_schedule = begin
     custom = get(CLI_ARGS, "epochs-schedule", "")
     if isempty(custom)
@@ -280,15 +292,16 @@ epochs_schedule = begin
         [parse(Int, strip(x)) for x in split(custom, ",") if !isempty(strip(x))]
     end
 end
-prob_schedule = fill(cli_float("kgmm-prob", 0.001), max(length(epochs_schedule), 1))
+prob_schedule = collect(range(0.0025, 0.0005, length=10))
+
 preprocessing_epochs = cli_int("preprocessing-epochs", quick_mode ? 120 : 1000)
 
 dt_gen = cli_float("langevin-dt", 0.005)
-n_steps_gen = cli_int("langevin-steps", quick_mode ? 200_000 : 10_000_000)
-resolution_gen = cli_int("langevin-resolution", quick_mode ? 10 : 2)
-n_ens_gen = cli_int("langevin-ens", 1)
-burnin_gen = cli_int("langevin-burnin", quick_mode ? 10_000 : 200_000)
-langevin_boundary = cli_float("langevin-boundary", quick_mode ? 30.0 : 100.0)
+n_steps_gen = cli_int("langevin-steps", quick_mode ? 200_000 : 200_000)
+resolution_gen = cli_int("langevin-resolution", quick_mode ? 20 : 20)
+n_ens_gen = cli_int("langevin-ens", 100)
+burnin_gen = cli_int("langevin-burnin", quick_mode ? 100 : 100)
+langevin_boundary = cli_float("langevin-boundary", quick_mode ? 10.0 : 10.0)
 
 mkpath(L63_FIGURES_DIR)
 mkpath(L63_SCORE_PDFS_DIR)
@@ -298,7 +311,7 @@ mkpath(L63_SCORE_PDFS_DIR)
 train_without_preprocessing(obs_uncorr, 1;
     sigma=sigma_value,
     neurons=neurons,
-    batch_size=batch_size,
+    batch_size=batch_size_no_pre,
     lr=lr,
     seed=9999)
 
@@ -306,7 +319,7 @@ train_without_preprocessing(obs_uncorr, 1;
 train_with_preprocessing(obs_uncorr, 1, first(prob_schedule);
     sigma=sigma_value,
     neurons=neurons,
-    batch_size=batch_size,
+    batch_size=batch_size_pre,
     lr=lr,
     seed=19_999)
 
@@ -321,18 +334,29 @@ results_pre    = PreResult[]
 prev_nn = nothing
 prev_opt_state = nothing
 cumulative_time_no_pre = 0.0
+prev_epochs_no_pre = 0
+all_losses_no_pre = Float64[]  # Accumulate losses across all incremental training
 for (i, epochs) in enumerate(epochs_schedule)
-    global prev_nn, prev_opt_state, cumulative_time_no_pre
-    seed = 10_000 + i
-    prev_nn, losses, cumulative_time_no_pre, prev_opt_state = train_without_preprocessing(obs_uncorr, epochs;
+    global prev_nn, prev_opt_state, cumulative_time_no_pre, prev_epochs_no_pre, all_losses_no_pre
+    delta_epochs = epochs - prev_epochs_no_pre
+    if delta_epochs <= 0
+        @warn "Skipping non-incremental epoch request" requested=epochs previous=prev_epochs_no_pre
+        continue
+    end
+    # Use FIXED seed for consistent incremental training (not different seeds!)
+    seed = 10_000
+    prev_nn, losses, cumulative_time_no_pre, prev_opt_state = train_without_preprocessing(obs_uncorr, delta_epochs;
         sigma=sigma_value,
         neurons=neurons,
-        batch_size=batch_size,
+        batch_size=batch_size_no_pre,
         lr=lr,
         seed=seed,
         nn_prev=prev_nn,
         cumulative_time=cumulative_time_no_pre,
         opt_state_prev=prev_opt_state)
+    # Accumulate losses for continuous plot
+    append!(all_losses_no_pre, losses)
+    prev_epochs_no_pre = epochs
     nn = prev_nn
     t_train = cumulative_time_no_pre
     final_loss = isempty(losses) ? NaN : losses[end]
@@ -345,20 +369,62 @@ for (i, epochs) in enumerate(epochs_schedule)
         burnin_steps=burnin_gen,
         boundary=langevin_boundary,
         dim=dim)
-    rel_ent = ScoreEstimation.relative_entropy(obs_uncorr, samples_nn; npoints=2048)
+    # Compute relative entropy on HELD-OUT TEST DATA (not training data!)
+    rel_ent = ScoreEstimation.relative_entropy(obs_test, samples_nn; npoints=2048)
     push!(results_no_pre, (epochs=epochs, train_time=t_train, relative_entropy=rel_ent, final_loss=final_loss))
-    @info "preprocessing=false" epochs=epochs train_time=t_train relative_entropy=rel_ent
+    rel_ent_mean = mean(rel_ent)
+    @info "preprocessing=false" epochs=epochs train_time=t_train relative_entropy=rel_ent_mean
 
-    # Save quick diagnostic plot for x-component KDE
+    # Save comprehensive diagnostic plot: 4 PDFs + loss history
     if size(samples_nn, 2) > 0
-        kde_obs_x = kde(obs_uncorr[1, :])
-        kde_nn_x = kde(samples_nn[1, :])
-        fig = Plots.plot(kde_obs_x.x, kde_obs_x.density;
-            label="obs (normalized x)", linewidth=2, color=:steelblue,
-            xlabel="x_norm", ylabel="density",
-            title="No preprocessing: epochs=$(epochs)")
-        Plots.plot!(fig, kde_nn_x.x, kde_nn_x.density;
-            label="NN sample", linewidth=2, linestyle=:dash, color=:darkorange)
+        fig = Plots.plot(layout=@layout([grid(2,2); a{0.3h}]), size=(1800, 1200))
+        
+        # Panel 1: Mean univariate marginal across all dimensions (using TEST data)
+        # Compute mean KDE across all dimensions
+        kde_obs_all = kde(vec(obs_test))
+        kde_nn_all = kde(vec(samples_nn))
+        Plots.plot!(fig[1], kde_obs_all.x, kde_obs_all.density;
+            label="test data", linewidth=2, linestyle=:solid, color=:steelblue)
+        Plots.plot!(fig[1], kde_nn_all.x, kde_nn_all.density;
+            label="NN", linewidth=2, linestyle=:dash, color=:darkorange)
+        Plots.xlabel!(fig[1], "normalized value")
+        Plots.ylabel!(fig[1], "density")
+        Plots.title!(fig[1], "Mean univariate marginal (test set)")
+        
+        # Panel 2: x vs y (bivariate) - using TEST data
+        Plots.scatter!(fig[2], obs_test[1, 1:min(2000, end)], obs_test[2, 1:min(2000, end)];
+            label="test data", markersize=2, alpha=0.3, color=:steelblue)
+        Plots.scatter!(fig[2], samples_nn[1, 1:min(2000, end)], samples_nn[2, 1:min(2000, end)];
+            label="NN", markersize=2, alpha=0.3, color=:darkorange)
+        Plots.xlabel!(fig[2], "x")
+        Plots.ylabel!(fig[2], "y")
+        Plots.title!(fig[2], "x vs y")
+        
+        # Panel 3: x vs z (bivariate) - using TEST data
+        Plots.scatter!(fig[3], obs_test[1, 1:min(2000, end)], obs_test[3, 1:min(2000, end)];
+            label="test data", markersize=2, alpha=0.3, color=:steelblue)
+        Plots.scatter!(fig[3], samples_nn[1, 1:min(2000, end)], samples_nn[3, 1:min(2000, end)];
+            label="NN", markersize=2, alpha=0.3, color=:darkorange)
+        Plots.xlabel!(fig[3], "x")
+        Plots.ylabel!(fig[3], "z")
+        Plots.title!(fig[3], "x vs z")
+        
+        # Panel 4: y vs z (bivariate) - using TEST data
+        Plots.scatter!(fig[4], obs_test[2, 1:min(2000, end)], obs_test[3, 1:min(2000, end)];
+            label="test data", markersize=2, alpha=0.3, color=:steelblue)
+        Plots.scatter!(fig[4], samples_nn[2, 1:min(2000, end)], samples_nn[3, 1:min(2000, end)];
+            label="NN", markersize=2, alpha=0.3, color=:darkorange)
+        Plots.xlabel!(fig[4], "y")
+        Plots.ylabel!(fig[4], "z")
+        Plots.title!(fig[4], "y vs z")
+        
+        # Panel 5: Loss history (spans bottom of figure)
+        Plots.plot!(fig[5], all_losses_no_pre;
+            xlabel="Training epoch", ylabel="Loss",
+            title="Loss: epochs=$(epochs)",
+            linewidth=2, color=:steelblue, label="",
+            legend=false)
+        
         pdf_path = joinpath(L63_SCORE_PDFS_DIR, "no_pre_epochs_$(lpad(epochs, 3, '0')).png")
         Plots.savefig(fig, pdf_path)
     end
@@ -368,12 +434,12 @@ end
 # -----------------------------------------------------------------------------
 # Sweep with preprocessing
 # -----------------------------------------------------------------------------
-for (i, epochs) in enumerate(epochs_schedule)
+for (i, prob) in enumerate(prob_schedule)
     Random.seed!(20_000 + i)
-    nn, losses, elapsed, clusters, prob = train_with_preprocessing(obs_uncorr, epochs, prob_schedule[i];
+    nn, losses, elapsed, clusters, prob = train_with_preprocessing(obs_uncorr, 300, prob;
         sigma=sigma_value,
         neurons=neurons,
-        batch_size=batch_size,
+        batch_size=batch_size_pre,
         lr=lr,
         seed=20_000 + i,
         conv_param=0.005,
@@ -389,20 +455,63 @@ for (i, epochs) in enumerate(epochs_schedule)
         burnin_steps=burnin_gen,
         boundary=langevin_boundary,
         dim=dim)
-    rel_ent = ScoreEstimation.relative_entropy(obs_uncorr, samples_nn; npoints=2048)
+    # Compute relative entropy on HELD-OUT TEST DATA (not training data!)
+    rel_ent = ScoreEstimation.relative_entropy(obs_test, samples_nn; npoints=2048)
     push!(results_pre, (clusters=clusters, clusters_actual=clusters, prob=prob, train_time=elapsed, relative_entropy=rel_ent, final_loss=final_loss))
-    @info "preprocessing=true" epochs=epochs clusters=clusters prob=prob train_time=elapsed relative_entropy=rel_ent
+    rel_ent_mean = mean(rel_ent)
+    @info "preprocessing=true" prob=prob clusters=clusters train_time=elapsed relative_entropy=rel_ent_mean
 
+    # Save comprehensive diagnostic plot: 4 PDFs + loss history
     if size(samples_nn, 2) > 0
-        kde_obs_x = kde(obs_uncorr[1, :])
-        kde_nn_x = kde(samples_nn[1, :])
-        fig = Plots.plot(kde_obs_x.x, kde_obs_x.density;
-            label="obs (normalized x)", linewidth=2, color=:steelblue,
-            xlabel="x_norm", ylabel="density",
-            title="KGMM preprocessing: epochs=$(epochs), clusters=$(clusters)")
-        Plots.plot!(fig, kde_nn_x.x, kde_nn_x.density;
-            label="NN sample", linewidth=2, linestyle=:dash, color=:darkorange)
-        pdf_path = joinpath(L63_SCORE_PDFS_DIR, "pre_epochs_$(lpad(epochs, 3, '0')).png")
+        fig = Plots.plot(layout=@layout([grid(2,2); a{0.3h}]), size=(1800, 1200))
+        
+        # Panel 1: Mean univariate marginal across all dimensions (using TEST data)
+        # Compute mean KDE across all dimensions
+        kde_obs_all = kde(vec(obs_test))
+        kde_nn_all = kde(vec(samples_nn))
+        Plots.plot!(fig[1], kde_obs_all.x, kde_obs_all.density;
+            label="test data", linewidth=2, linestyle=:solid, color=:steelblue)
+        Plots.plot!(fig[1], kde_nn_all.x, kde_nn_all.density;
+            label="NN", linewidth=2, linestyle=:dash, color=:darkorange)
+        Plots.xlabel!(fig[1], "normalized value")
+        Plots.ylabel!(fig[1], "density")
+        Plots.title!(fig[1], "Mean univariate marginal (test set)")
+        
+        # Panel 2: x vs y (bivariate) - using TEST data
+        Plots.scatter!(fig[2], obs_test[1, 1:min(2000, end)], obs_test[2, 1:min(2000, end)];
+            label="test data", markersize=2, alpha=0.3, color=:steelblue)
+        Plots.scatter!(fig[2], samples_nn[1, 1:min(2000, end)], samples_nn[2, 1:min(2000, end)];
+            label="NN", markersize=2, alpha=0.3, color=:darkorange)
+        Plots.xlabel!(fig[2], "x")
+        Plots.ylabel!(fig[2], "y")
+        Plots.title!(fig[2], "x vs y")
+        
+        # Panel 3: x vs z (bivariate) - using TEST data
+        Plots.scatter!(fig[3], obs_test[1, 1:min(2000, end)], obs_test[3, 1:min(2000, end)];
+            label="test data", markersize=2, alpha=0.3, color=:steelblue)
+        Plots.scatter!(fig[3], samples_nn[1, 1:min(2000, end)], samples_nn[3, 1:min(2000, end)];
+            label="NN", markersize=2, alpha=0.3, color=:darkorange)
+        Plots.xlabel!(fig[3], "x")
+        Plots.ylabel!(fig[3], "z")
+        Plots.title!(fig[3], "x vs z")
+        
+        # Panel 4: y vs z (bivariate) - using TEST data
+        Plots.scatter!(fig[4], obs_test[2, 1:min(2000, end)], obs_test[3, 1:min(2000, end)];
+            label="test data", markersize=2, alpha=0.3, color=:steelblue)
+        Plots.scatter!(fig[4], samples_nn[2, 1:min(2000, end)], samples_nn[3, 1:min(2000, end)];
+            label="NN", markersize=2, alpha=0.3, color=:darkorange)
+        Plots.xlabel!(fig[4], "y")
+        Plots.ylabel!(fig[4], "z")
+        Plots.title!(fig[4], "y vs z")
+        
+        # Panel 5: Loss history for this training run (spans bottom of figure)
+        Plots.plot!(fig[5], losses;
+            xlabel="Training epoch", ylabel="Loss",
+            title="Loss: prob=$(prob), clusters=$(clusters)",
+            linewidth=2, color=:darkorange, label="",
+            legend=false)
+        
+        pdf_path = joinpath(L63_SCORE_PDFS_DIR, "pre_prob_$(lpad(prob, 3, '0')).png")
         Plots.savefig(fig, pdf_path)
     end
     GC.gc()
@@ -455,7 +564,8 @@ h5open(L63_PERF_H5, "w") do file
     write(file, "results_pre_clusters", Int.([r.clusters for r in results_pre]))
     write(file, "sigma", Float64(sigma_value))
     write(file, "neurons", Int.(neurons))
-    write(file, "batch_size", Int(batch_size))
+    write(file, "batch_size_no_pre", Int(batch_size_no_pre))
+    write(file, "batch_size_pre", Int(batch_size_pre))
     write(file, "lr", Float64(lr))
     write(file, "langevin_dt", Float64(dt_gen))
     write(file, "langevin_steps", Int(n_steps_gen))
@@ -469,3 +579,6 @@ end
 
 @info "Saved $(L63_REL_ENT_FIG)"
 @info "Saved $(L63_PERF_H5)"
+ 
+
+# nohup /home/ludovico/.juliaup/bin/julia -t auto --project=scripts scripts/lorenz63/lorenz63_performances.jl > lorenz63_nohup.log 2>&1 &

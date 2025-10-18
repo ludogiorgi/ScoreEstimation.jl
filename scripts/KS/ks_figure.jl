@@ -62,10 +62,6 @@ function load_run_data(run_name::String)
         selected_indices = Int.(read(h5, "selected_indices"))
         reduced_means = read(h5, "reduced_means")
         reduced_stds = read(h5, "reduced_stds")
-        kde_emp_x = read(h5, "kde_emp_x")
-        kde_emp_density = read(h5, "kde_emp_density")
-        kde_gen_x = read(h5, "kde_gen_x")
-        kde_gen_density = read(h5, "kde_gen_density")
         data_stride = Int(read(h5, "data_stride"))
         mode_stride = Int(read(h5, "mode_stride"))
         return (
@@ -75,10 +71,6 @@ function load_run_data(run_name::String)
             selected_indices=selected_indices,
             reduced_means=reduced_means,
             reduced_stds=reduced_stds,
-            kde_emp_x=kde_emp_x,
-            kde_emp_density=kde_emp_density,
-            kde_gen_x=kde_gen_x,
-            kde_gen_density=kde_gen_density,
             data_stride=data_stride,
             mode_stride=mode_stride
         )
@@ -228,10 +220,9 @@ function select_reference_modes(reference_data::AbstractMatrix, latent_dim::Int)
     return reference_data[indices, :], indices, stride
 end
 
-function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
+function build_comparison_figure(runs::Vector{String})
     @assert length(runs) == 3 "Expected exactly 3 runs"
-    @assert length(strides) == 3 "Expected exactly 3 strides"
-    
+
     fig = Figure(size=(2400, 3000), fontsize=24)
     rowgap!(fig.layout, 16)
     colgap!(fig.layout, 20)
@@ -245,7 +236,6 @@ function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
     reference_data_full, reference_time_indices = load_reference_dataset(max_snapshots=1000)
     
     for (col_idx, run_name) in enumerate(runs)
-        stride = strides[col_idx]
         data = load_run_data(run_name)
         X_emp = unnormalize_data(data.Xn_emp, data.reduced_means, data.reduced_stds)
         X_gen = unnormalize_data(data.X_gen_n, data.reduced_means, data.reduced_stds)
@@ -255,14 +245,12 @@ function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
         orig_min = min(orig_min, minimum(reference_subset))
         orig_max = max(orig_max, maximum(reference_subset))
         
-        push!(all_data, (run_name=run_name, stride=stride, data=data,
+        push!(all_data, (run_name=run_name, data=data,
                          empirical_subset=empirical_subset, generated_subset=generated_subset,
-                         kde_emp_x=data.kde_emp_x, kde_emp_density=data.kde_emp_density,
-                         kde_gen_x=data.kde_gen_x, kde_gen_density=data.kde_gen_density,
                          reference_subset=reference_subset, reference_time_indices=reference_time_indices,
                          reference_stride=reference_stride, selected_indices=data.selected_indices))
     end
-    
+
     datasets_for_range = Any[]
     for run_data in all_data
         push!(datasets_for_range, run_data.empirical_subset)
@@ -270,20 +258,23 @@ function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
     end
     value_range = compute_symmetric_value_range(datasets_for_range; padding_fraction=0.05)
     
-    pdf_max_values = [maximum(run_data.kde_emp_density) for run_data in all_data]
-    append!(pdf_max_values, [maximum(run_data.kde_gen_density) for run_data in all_data])
-    max_pdf = maximum(pdf_max_values)
-    pdf_ylim = max_pdf > 0 ? (0.0, max_pdf * 1.05) : (0.0, 1.0)
-    
+    all_uni_emp = PDFEstimate[]
+    all_uni_gen = PDFEstimate[]
     all_biv_emp = []
     all_biv_gen = []
     for run_data in all_data
         avg_uni_emp, avg_biv_emp = compute_averaged_pdfs(run_data.empirical_subset; value_range=value_range)
         avg_uni_gen, avg_biv_gen = compute_averaged_pdfs(run_data.generated_subset; value_range=value_range)
+        push!(all_uni_emp, avg_uni_emp)
+        push!(all_uni_gen, avg_uni_gen)
         push!(all_biv_emp, avg_biv_emp)
         push!(all_biv_gen, avg_biv_gen)
     end
-    
+
+    pdf_max_values = max.(maximum.(getfield.(all_uni_emp, :density)), maximum.(getfield.(all_uni_gen, :density)))
+    max_pdf = maximum(pdf_max_values)
+    pdf_ylim = max_pdf > 0 ? (0.0, max_pdf * 1.05) : (0.0, 1.0)
+
     biv_max_dist1 = maximum([maximum(all_biv_emp[i][1].density) for i in 1:3] ∪ 
                              [maximum(all_biv_gen[i][1].density) for i in 1:3])
     biv_max_dist2 = maximum([maximum(all_biv_emp[i][2].density) for i in 1:3] ∪ 
@@ -295,18 +286,19 @@ function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
     line_emp_handle = nothing
     line_gen_handle = nothing
     
-    for (col_idx, (run_name, stride, data, empirical_subset, generated_subset,
-                   kde_emp_x, kde_emp_density, kde_gen_x, kde_gen_density,
+    for (col_idx, (run_name, data, empirical_subset, generated_subset,
                    reference_subset, reference_time_indices, reference_stride, selected_indices)) in enumerate(all_data)
-        @info "Processing run $(col_idx)/3" run=run_name stride=stride
-        
+        @info "Processing run $(col_idx)/3" run=run_name
+
         avg_biv_emp = all_biv_emp[col_idx]
         avg_biv_gen = all_biv_gen[col_idx]
-        
+        avg_uni_emp = all_uni_emp[col_idx]
+        avg_uni_gen = all_uni_gen[col_idx]
+
         latent_dim = size(empirical_subset, 1)
         @info "Row 1 subsampling" col=col_idx N=latent_dim ref_stride=reference_stride
         
-        col_title = "N=$latent_dim (stride=$reference_stride)"
+        col_title = "N=$latent_dim"
         ax1 = Axis(fig[1, col_idx];
                    xlabel="Time index",
                    ylabel="Space index",
@@ -318,7 +310,7 @@ function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
                           collect(reference_time_indices),
                           collect(1:latent_dim),
                           permutedims(reference_subset);
-                          colormap=:plasma,
+                          colormap=:viridis,
                           colorrange=(orig_min, orig_max),
                           interpolate=true)
         ax1.yticks = (1:latent_dim, string.(1:latent_dim))
@@ -333,9 +325,9 @@ function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
             ax2.ylabelvisible = false
         end
         # Use colors from the plasma colormap for consistency
-        plasma_cmap = cgrad(:plasma)
-        emp_line = lines!(ax2, kde_emp_x, kde_emp_density; color=plasma_cmap[0.2], linewidth=5)
-        gen_line = lines!(ax2, kde_gen_x, kde_gen_density; color=plasma_cmap[0.8], linewidth=5)
+        plasma_cmap = cgrad(:viridis)
+        emp_line = lines!(ax2, avg_uni_emp.x, avg_uni_emp.density; color=plasma_cmap[0.2], linewidth=5)
+        gen_line = lines!(ax2, avg_uni_gen.x, avg_uni_gen.density; color=plasma_cmap[0.8], linewidth=5)
         xlims!(ax2, value_range...)
         ylims!(ax2, pdf_ylim...)
         if line_emp_handle === nothing
@@ -345,13 +337,13 @@ function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
         
         ax3 = Axis(fig[3, col_idx];
                    xlabel="x_i",
-                   ylabel="x_{i+1}",
+                   ylabel="True\nx_{i+1}",
                    aspect=DataAspect())
         if col_idx != 1
             ax3.ylabelvisible = false
         end
         hm_tmp = heatmap!(ax3, avg_biv_emp[1].x, avg_biv_emp[1].y, avg_biv_emp[1].density;
-                          colormap=:plasma,
+                          colormap=:viridis,
                           colorrange=(0, biv_max_dist1),
                           interpolate=true)
         xlims!(ax3, value_range...)
@@ -362,13 +354,13 @@ function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
         
         ax4 = Axis(fig[4, col_idx];
                    xlabel="x_i",
-                   ylabel="x_{i+1}",
+                   ylabel="KGMM\nx_{i+1}",
                    aspect=DataAspect())
         if col_idx != 1
             ax4.ylabelvisible = false
         end
         heatmap!(ax4, avg_biv_gen[1].x, avg_biv_gen[1].y, avg_biv_gen[1].density;
-                 colormap=:plasma,
+                 colormap=:viridis,
                  colorrange=(0, biv_max_dist1),
                  interpolate=true)
         xlims!(ax4, value_range...)
@@ -376,13 +368,13 @@ function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
         
         ax5 = Axis(fig[5, col_idx];
                    xlabel="x_i",
-                   ylabel="x_{i+2}",
+                   ylabel="True\nx_{i+2}",
                    aspect=DataAspect())
         if col_idx != 1
             ax5.ylabelvisible = false
         end
         hm_tmp = heatmap!(ax5, avg_biv_emp[2].x, avg_biv_emp[2].y, avg_biv_emp[2].density;
-                          colormap=:plasma,
+                          colormap=:viridis,
                           colorrange=(0, biv_max_dist2),
                           interpolate=true)
         xlims!(ax5, value_range...)
@@ -393,13 +385,13 @@ function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
         
         ax6 = Axis(fig[6, col_idx];
                    xlabel="x_i",
-                   ylabel="x_{i+2}",
+                   ylabel="KGMM\nx_{i+2}",
                    aspect=DataAspect())
         if col_idx != 1
             ax6.ylabelvisible = false
         end
         heatmap!(ax6, avg_biv_gen[2].x, avg_biv_gen[2].y, avg_biv_gen[2].density;
-                 colormap=:plasma,
+                 colormap=:viridis,
                  colorrange=(0, biv_max_dist2),
                  interpolate=true)
         xlims!(ax6, value_range...)
@@ -409,18 +401,17 @@ function build_comparison_figure(runs::Vector{String}, strides::Vector{Int})
     Colorbar(fig[1, 4], hm_orig, label="Field value")
     if line_emp_handle !== nothing && line_gen_handle !== nothing
         Legend(fig[2, 4], [line_emp_handle, line_gen_handle],
-               ["Empirical", "Generated"]; orientation=:vertical)
+               ["True", "KGMM"]; orientation=:vertical)
     end
-    Colorbar(fig[3:4, 4], hm_biv_emp_d1, label="Density  (delta = 1)")
-    Colorbar(fig[5:6, 4], hm_biv_emp_d2, label="Density  (delta = 2)")
+    Colorbar(fig[3:4, 4], hm_biv_emp_d1, label="Density")
+    Colorbar(fig[5:6, 4], hm_biv_emp_d2, label="Density")
     
     return fig
 end
 
 @info "Starting KS multi-run comparison figure generation"
-runs = ["run_003", "run_001", "run_002"]
-strides = [8, 4, 2]
-fig = build_comparison_figure(runs, strides)
+runs = ["run_400", "run_800", "run_160"]
+fig = build_comparison_figure(runs)
 
 output_path = joinpath(KS_ROOT, "figure_ks.png")
 CairoMakie.save(output_path, fig)

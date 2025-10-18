@@ -253,6 +253,56 @@ function select_modes(data::AbstractMatrix, stride::Int)
 end
 
 """
+    build_circshifted_modes(data, stride, copies) -> (centered, indices, mean_field)
+
+Construct the centered, mode-restricted dataset produced by
+`select_modes(stack_circshifts(data, copies) .- mean; stride)` without
+materialising the full stacked matrix. Returns the centered coordinates,
+the retained indices, and the per-row mean of the stacked field.
+"""
+function build_circshifted_modes(data::AbstractMatrix{T}, stride::Int, copies::Int) where {T<:AbstractFloat}
+    copies = max(copies, 1)
+    stride <= 0 && error("n_modes (stride) must be positive; got $(stride)")
+    D, N = size(data)
+    indices = collect(1:stride:D)
+    isempty(indices) && error("Mode subsampling produced no coordinates; check n_modes and grid size")
+
+    row_sums = Vector{Float64}(undef, D)
+    @inbounds for r in 1:D
+        row_sums[r] = sum(@view data[r, :])
+    end
+
+    denom = Float64(N) * Float64(copies)
+    mean_field = Vector{T}(undef, D)
+    @inbounds for r in 1:D
+        acc = 0.0
+        for shift in 0:(copies - 1)
+            acc += row_sums[mod1(r - shift, D)]
+        end
+        mean_field[r] = T(acc / denom)
+    end
+
+    total_cols = N * copies
+    centered = Matrix{T}(undef, length(indices), total_cols)
+    @inbounds for (block_idx, shift) in enumerate(0:(copies - 1))
+        col_start = (block_idx - 1) * N + 1
+        col_end = block_idx * N
+        col_range = col_start:col_end
+        for (row_pos, row_idx) in enumerate(indices)
+            src_row = mod1(row_idx - shift, D)
+            src = view(data, src_row, :)
+            dest = view(centered, row_pos, col_range)
+            μ = mean_field[row_idx]
+            @inbounds @simd for j in 1:N
+                dest[j] = src[j] - μ
+            end
+        end
+    end
+
+    return centered, indices, mean_field
+end
+
+"""
     normalize_data(X, mode) -> (Xn, means, stds)
 
 Standardize latent coordinates according to `mode`. When `mode == :per_dim`
@@ -262,18 +312,35 @@ so the most variable component attains unit variance while others remain
 subunit. Zero-variance coordinates fall back to `eps(Float64)` to avoid
 division by zero.
 """
-function normalize_data(X::AbstractMatrix, mode::Symbol)
-    means = vec(mean(X; dims=2))
-    raw_stds = vec(std(X; dims=2))
-    raw_stds = map(x -> x > 0 ? x : eps(Float64), raw_stds)
-    stds = if mode == :max
-        max_std = maximum(raw_stds)
-        scale = max_std > 0 ? max_std : eps(Float64)
-        fill(scale, length(raw_stds))
+function normalize_data(X::AbstractMatrix{T}, mode::Symbol; inplace::Bool=false) where {T<:Real}
+    means64 = vec(mean(X; dims=2))
+    raw_stds64 = vec(std(X; dims=2))
+    raw_stds64 = map(x -> x > 0 ? x : eps(Float64), raw_stds64)
+    stds64 = if mode == :max
+        max_std = maximum(raw_stds64)
+        scale = max(max_std, eps(Float64))
+        fill(scale, length(raw_stds64))
     else
-        raw_stds
+        raw_stds64
     end
-    Xn = (X .- means) ./ stds
+
+    means = T.(means64)
+    stds = T.(stds64)
+    Xn = inplace ? X : similar(X)
+
+    d, n = size(X)
+    @inbounds for i in 1:d
+        μ = means[i]
+        σ = stds[i]
+        σ = σ == 0 ? T(eps(T)) : σ
+        invσ = T(1) / σ
+        src = view(X, i, :)
+        dest = inplace ? src : view(Xn, i, :)
+        @simd for j in 1:n
+            dest[j] = (src[j] - μ) * invσ
+        end
+    end
+
     return Xn, means, stds
 end
 
@@ -294,7 +361,7 @@ preprocessing branch that powers the reduced experiments and keep the API fully
 typed so experiment scripts can introspect losses/cluster counts.
 """
 function train_score_model(Xn::AbstractMatrix, cfg::KSConfig)
-    obs = Float32.(Xn)
+    obs = eltype(Xn) <: Float32 ? Xn : Float32.(Xn)
     Random.seed!(cfg.seed)
     nn, losses, _, _, _, res, _ = ScoreEstimation.train(
         obs;
@@ -751,39 +818,28 @@ end
 
 Random.seed!(cfg.seed)
 
-data, delta_t = load_ks_data(KS_DATAFILE; stride=cfg.stride, max_snapshots=cfg.max_snapshots, dataset_key=cfg.dataset_key)
-std(data, dims=2)
+data_raw, delta_t = load_ks_data(KS_DATAFILE; stride=cfg.stride, max_snapshots=cfg.max_snapshots, dataset_key=cfg.dataset_key)
+data = Float32.(data_raw)
+data_raw = nothing
+GC.gc()
 
-# Use stack_circshifts from ScoreEstimation.stack_circshifts (defined in utils.jl)
-joined_data = ScoreEstimation.stack_circshifts(data, cfg.train_copies)
-data = joined_data
+coords_centered, retained_indices, mean_field = build_circshifted_modes(data, cfg.n_modes, cfg.train_copies)
+data = nothing
+GC.gc()
 
+latent_dim = size(coords_centered, 1)
+@info "Selected modes" stride=cfg.n_modes latent_dim=latent_dim train_copies=cfg.train_copies
 
-# kde_xx = kde(data[[1,3], :]')
-# heatmap(kde_xx.x, kde_xx.y, kde_xx.density; label="latent coords",
-#    title="KDE of first two spatial points", xlabel="u(x=1)", ylabel="u(x=2)")
+Xn_full, means, stds = normalize_data(coords_centered, cfg.normalize_mode; inplace=true)
+coords_centered = nothing
 
-nx, n_snapshots = size(data)
-# decorrelation_steps = average_decorrelation_length(data)
-# @info "Average decorrelation length" steps=decorrelation_steps
-mean_field = vec(mean(data; dims=2))
-data_centered = data .- mean_field
-
-coords, retained_indices = select_modes(data_centered, cfg.n_modes)
-latent_dim = size(coords, 1)
-@info "Selected modes" stride=cfg.n_modes latent_dim=latent_dim
-
-# Normalize using FULL coords to get correct statistics
-Xn_full, means, stds = normalize_data(coords, cfg.normalize_mode)
-
-# Truncate AFTER normalization if needed
 if cfg.train_max > 0 && size(Xn_full, 2) > cfg.train_max
-    Xn = Xn_full[:, 1:cfg.train_max]
+    Xn = @view Xn_full[:, 1:cfg.train_max]
 else
     Xn = Xn_full
 end
 kgmm_sample_count = size(Xn, 2)
-@info "Training score model" latent_dim=latent_dim epochs=cfg.n_epochs batch_size=cfg.batch_size train_samples=kgmm_sample_count total_samples=size(coords,2) train_copies=cfg.train_copies
+@info "Training score model" latent_dim=latent_dim epochs=cfg.n_epochs batch_size=cfg.batch_size train_samples=kgmm_sample_count total_samples=size(Xn_full, 2) train_copies=cfg.train_copies
 nn, losses, kgmm_res = train_score_model(Xn, cfg)
 final_loss = isempty(losses) ? NaN : losses[end]
 @info "Training completed" final_loss
@@ -805,11 +861,12 @@ samples_n = sample_langevin(latent_dim, nn, cfg)
 #     title="KDE of normalized latent coordinates", xlabel="reduced coordinate", ylabel="density")
 # plot(plt1, plt2; layout=(1, 2), size=(900, 400))
 
-X_gen_n = samples_n
+X_gen_n = Float32.(samples_n)
+samples_n = nothing
 X_gen = unnormalize_data(X_gen_n, means, stds)
 
 generated_subset = assemble_physical_subset(X_gen, mean_field, retained_indices)
-empirical_subset = data[retained_indices, :]
+empirical_subset = assemble_physical_subset(unnormalize_data(Xn_full, means, stds), mean_field, retained_indices)
 
 pdf_emp_samples = collect_for_kde(empirical_subset, cfg.kde_max_samples)
 pdf_gen_samples = collect_for_kde(generated_subset, cfg.kde_max_samples)
@@ -858,7 +915,7 @@ avg_uni_gen, avg_biv_gen = compute_averaged_pdfs(generated_subset; value_range=v
 @info "Averaged PDFs computed" n_dimensions=size(empirical_subset, 1) n_bivariate_distances=length(avg_biv_emp)
 
 comparison_fig_run_path = joinpath(run_dir, "comparison.png")
-analysis_fig_path, modes_fig_path = build_plot(series_emp, series_gen, coords, X_gen,
+analysis_fig_path, modes_fig_path = build_plot(series_emp, series_gen, Xn_full, X_gen,
     kde_emp, kde_gen, avg_uni_emp, avg_uni_gen, avg_biv_emp, avg_biv_gen,
     rel_ent, cfg, cluster_count, delta_t, observable_idx;
     save_path=comparison_fig_run_path)
@@ -868,8 +925,8 @@ run_output_path = joinpath(run_dir, "output.h5")
 run_label = basename(run_dir)
 
 result_kwargs = (
-    Xn = Float32.(Xn_full),
-    X_gen_n = Float32.(X_gen_n),
+    Xn = Xn_full,
+    X_gen_n = X_gen_n,
     mean_field = mean_field,
     selected_indices = retained_indices,
     reduced_means = means,

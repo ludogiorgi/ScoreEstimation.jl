@@ -3,9 +3,10 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 Pkg.instantiate()
 
 using CairoMakie
-using CairoMakie: Figure, Axis, Legend, Theme, set_theme!, lines!, scatter!, axislegend, save, GridLayout
+using CairoMakie: Figure, Axis, Legend, Theme, set_theme!, lines!, scatter!, scatterlines!, axislegend, save, GridLayout
 using HDF5
 using Colors
+using Statistics
 
 const L63_ROOT = @__DIR__
 const L63_FIGURES_DIR = joinpath(L63_ROOT, "figures")
@@ -53,31 +54,38 @@ h5open(perf_path, "r") do file
     dims = size(rel_ent_no_pre, 1)
     axes_labels = ["x", "y", "z"]
 
-    fig1 = Figure(size=(1100, 400 + 200 * dims))
-    ax_list = Axis[]
-    for d in 1:dims
-        ax = Axis(fig1[d, 1],
-            xlabel = "Training time (s)",
-            ylabel = "Relative entropy",
-            title = "Lorenz-63: D_KL per dimension ($(axes_labels[d]))",
-            xscale = log10,
-            yscale = log10,
-        )
-        push!(ax_list, ax)
-        lines!(ax, train_times_no_pre, rel_ent_no_pre[d, :];
-            color = color_nopreproc,
-            marker = :circle,
-            linewidth = 2,
-            markersize = 12,
-            label = "No KGMM")
-        lines!(ax, train_times_pre, rel_ent_pre[d, :];
-            color = color_preproc,
-            marker = :diamond,
-            linewidth = 2,
-            markersize = 12,
-            label = "KGMM")
-        axislegend(ax, position = :rb, framevisible = true, labelsize = 14)
-    end
+    # Compute average KL divergence across dimensions
+    avg_rel_ent_no_pre = vec(mean(rel_ent_no_pre, dims=1))
+    avg_rel_ent_pre = vec(mean(rel_ent_pre, dims=1))
+
+    fig1 = Figure(size=(800, 600))
+    ax = Axis(fig1[1, 1],
+        xlabel = "Training time (s)",
+        ylabel = "Average relative entropy",
+        title = "Lorenz-63",
+        xscale = log10,
+        yscale = log10,
+    )
+
+    scatterlines!(ax, train_times_no_pre, avg_rel_ent_no_pre;
+        color = color_nopreproc,
+        marker = :circle,
+        linewidth = 2,
+        markersize = 12,
+        label = "No KGMM")
+    scatterlines!(ax, train_times_pre, avg_rel_ent_pre;
+        color = color_preproc,
+        marker = :diamond,
+        linewidth = 2,
+        markersize = 12,
+        label = "KGMM")
+
+    Legend(fig1[2, 1], ax,
+        orientation = :horizontal,
+        tellwidth = false,
+        tellheight = true,
+        framevisible = true,
+        labelsize = 14)
 
     save(joinpath(L63_PUB_DIR, "lorenz63_performance_comparison.png"), fig1, px_per_unit=2)
     save(joinpath(L63_PUB_DIR, "lorenz63_performance_comparison.pdf"), fig1)

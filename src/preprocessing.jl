@@ -43,7 +43,8 @@ The sizes of `x`, `z`, and `μ` must match.
                               μ::AbstractMatrix, σ::Real)
     @assert size(x) == size(z) == size(μ)
     randn!(z)
-    @inbounds @. x = μ + σ*z
+    σT = convert(eltype(x), σ)
+    @inbounds @. x = μ + σT * z
     return x, z
 end
 
@@ -140,113 +141,6 @@ function _batch_stats(labels::AbstractVector{<:Integer},
     return Ez, Xc, sum_z2, cnt
 end
 
-"""
-    _ema_partition_means_collect(σ, μ; prob=1e-3, do_print=false, conv_param=1e-2, i_max=150)
-
-Compute per-cluster EMA means for a fixed σ and, **during EMA**, accumulate
-`∑‖z‖²` and counts per cluster.
-
-Returns `(Ez, Emu, Xc, Nc, ssp, Ezz2, counts)` where `Ezz2 = sum_z2 ./ counts`
-(with `NaN` for empty clusters).
-"""
-function _ema_partition_means_collect(σ::Float64, μ::AbstractMatrix{<:Real};
-                                      prob::Float64=0.001,
-                                      do_print::Bool=false,
-                                      conv_param::Float64=1e-1,
-                                      i_max::Int=150)
-    # Initial draw x0 = μ + σ*z0
-    x0 = similar(μ, Float64)
-    z0 = similar(μ, Float64)
-    _draw_noisy!(x0, z0, μ, σ)
-
-    # Partition built once from x0
-    method = Tree(false, prob)
-    ssp = StateSpacePartition(x0; method=method)
-    C = maximum(ssp.partitions)
-    do_print && println("Number of clusters: $C")
-
-    # First-batch stats (includes z2 and counts)
-    labels0 = Vector{Int}(undef, size(μ, 2))
-    _assign_labels!(labels0, x0, ssp)
-    Ez, Xc, z2_sums, cnts = _batch_stats(labels0, z0, x0, μ)
-
-    # Buffers reused across iterations
-    d, N = size(μ)
-    x = similar(μ, Float64)
-    z = similar(μ, Float64)
-    labels = Vector{Int}(undef, N)
-
-    Ez_old, Xc_old = Ez, Xc
-    Ez_new  = similar(Ez_old)
-    Xc_new  = similar(Xc_old)
-
-    # Accumulators across EMA
-    sum_z2 = copy(z2_sums)
-    counts = copy(cnts)
-    # Keep running sums of means to weight by counts per cluster across batches
-    sum_z_means = Ez .* reshape(float.(counts), 1, :)
-    sum_x_means = Xc .* reshape(float.(counts), 1, :)
-
-    Δ = 1.0
-    i = 1
-    while Δ > conv_param && i < i_max
-        _draw_noisy!(x, z, μ, σ)
-        _assign_labels!(labels, x, ssp)
-        Ez_b, Xc_b, z2_b, cnt_b = _batch_stats(labels, z, x, μ)
-
-        # Update running sums for means using counts-weighted batch contributions
-        @inbounds for c in 1:C
-            n_new = cnt_b[c]
-            if n_new > 0
-                @views sum_z_means[:, c] .+= Ez_b[:, c] .* float(n_new)
-                @views sum_x_means[:, c] .+= Xc_b[:, c] .* float(n_new)
-            end
-        end
-
-        # Fold divergence statistics into the EMA loop
-        @inbounds @simd for c in 1:C
-            sum_z2[c] += z2_b[c]
-            counts[c] += cnt_b[c]
-        end
-
-        # Recompute means from sums with updated counts
-        @inbounds for c in 1:C
-            n_tot = counts[c]
-            if n_tot > 0
-                invn = inv(float(n_tot))
-                @views Ez_new[:, c] .= sum_z_means[:, c] .* invn
-                @views Xc_new[:, c] .= sum_x_means[:, c] .* invn
-            else
-                @views Ez_new[:, c] .= 0
-                @views Xc_new[:, c] .= 0
-            end
-        end
-
-        # Δ = mean(abs2, Ez_new - Ez_old) / max(mean(abs2, Ez_new), ϵ)
-        num = 0.0
-        den = 0.0
-        @inbounds @simd for k in eachindex(Ez_new)
-            diff = @fastmath (Ez_new[k] - Ez_old[k])
-            num += diff * diff
-            den += Ez_new[k] * Ez_new[k]
-        end
-        Δ = num / max(den, 1e-300)
-        do_print && println("Iteration: $i, Δ: $Δ")
-
-        Ez_old, Ez_new   = Ez_new, Ez_old
-        # Emu_old, Emu_new = Emu_new, Emu_old                         # (commented)
-        Xc_old,  Xc_new  = Xc_new,  Xc_old
-        i += 1
-    end
-
-    # Build Ezz2 from accumulated sums
-    Ezz2 = zeros(Float64, C)
-    @inbounds for c in 1:C
-        Ezz2[c] = counts[c] > 0 ? sum_z2[c] / counts[c] : NaN
-    end
-
-    return Ez_old, Xc_old, C, ssp, Ezz2, counts
-end
 
 """
     _score_and_divergence(Ez, Xc, Ezz2, σ) -> (score, divergence)
@@ -302,12 +196,18 @@ end
 
 """
     kgmm(σ::Real, μ; prob=1e-3, conv_param=1e-2, i_max=150,
-         show_progress=false)
+         show_progress=false, chunk_size=0,
+         partition_max_samples=0, scratch_eltype=:auto)
 
     kgmm(σs::AbstractVector{<:Real}, μ; ...)
 
 Kernel GMM estimator on a state-space partition learned at each σ.
 Divergence statistics are accumulated **during** the EMA loop.
+Optional keywords:
+- `chunk_size`: maximum number of columns processed at once (0 ⇒ auto).
+- `partition_max_samples`: cap on the number of columns used to build the partition.
+- `scratch_eltype`: element type for scratch buffers (`:auto` ⇒ `eltype(μ)`).
+
 For each σ, returns a `NamedTuple` with:
   centers, score, divergence, counts, Nc, partition.
 """
@@ -315,11 +215,17 @@ function kgmm(σ::Real, μ::AbstractMatrix{<:Real};
               prob::Float64=1e-3,
               conv_param::Float64=1e-2,
               i_max::Int=150,
-              show_progress::Bool=false)
+              show_progress::Bool=false,
+              chunk_size::Int=0,
+              partition_max_samples::Int=0,
+              scratch_eltype::Union{Symbol,Type}=:auto)
     Ez, Xc, C, ssp, Ezz2, counts =
         _ema_partition_means_collect(float(σ), μ;
                                      prob=prob, do_print=show_progress,
-                                     conv_param=conv_param, i_max=i_max)
+                                     conv_param=conv_param, i_max=i_max,
+                                     chunk_size=chunk_size,
+                                     partition_max_samples=partition_max_samples,
+                                     scratch_eltype=scratch_eltype)
 
     score, divergence = _score_and_divergence(Ez, Xc, Ezz2, σ)
 
@@ -338,4 +244,161 @@ function kgmm(σs::AbstractVector{<:Real}, μ::AbstractMatrix{<:Real}; kwargs...
         out[k] = kgmm(float(σs[k]), μ; kwargs...)
     end
     return out
+end
+"""
+    _ema_partition_means_collect(σ, μ;
+        prob=1e-3, do_print=false, conv_param=1e-2, i_max=150,
+        chunk_size=0, partition_max_samples=0, scratch_eltype=:auto)
+
+Compute per-cluster EMA means for a fixed σ while streaming data in column
+chunks. Accumulates `∑‖z‖²` and counts per cluster for divergence estimates.
+
+Returns `(Ez, Xc, Nc, ssp, Ezz2, counts)` with `Ezz2 = sum_z2 ./ counts`
+(using `NaN` for empty clusters).
+"""
+function _ema_partition_means_collect(σ::Float64, μ::AbstractMatrix{<:Real};
+                                      prob::Float64=0.001,
+                                      do_print::Bool=false,
+                                      conv_param::Float64=1e-1,
+                                      i_max::Int=150,
+                                      chunk_size::Int=0,
+                                      partition_max_samples::Int=0,
+                                      scratch_eltype::Union{Symbol,Type}=:auto)
+    d, N = size(μ)
+    N == 0 && error("kgmm received an empty dataset")
+
+    default_chunk = min(N, 250_000)
+    chunk = chunk_size <= 0 ? default_chunk : min(N, max(chunk_size, 1))
+
+    scratch_T = scratch_eltype === :auto ? eltype(μ) : scratch_eltype
+    scratch_T isa Type || error("scratch_eltype must be a concrete type or :auto")
+    scratch_T <: AbstractFloat || error("scratch_eltype must be a floating-point type")
+    σ_buf = scratch_T(σ)
+
+    x_buf = Matrix{scratch_T}(undef, d, chunk)
+    z_buf = Matrix{scratch_T}(undef, d, chunk)
+    labels_buf = Vector{Int}(undef, chunk)
+
+    default_partition_cap = partition_max_samples > 0 ?
+        partition_max_samples :
+        max(chunk, Int(ceil(100 / max(prob, eps(Float64)))))
+    partition_cols = min(N, default_partition_cap)
+    step = max(1, cld(N, partition_cols))
+    sample_indices = collect(1:step:N)
+    length(sample_indices) > partition_cols && (sample_indices = sample_indices[1:partition_cols])
+    sample_len = length(sample_indices)
+    x_sample = Matrix{scratch_T}(undef, d, sample_len)
+    z_sample = Matrix{scratch_T}(undef, d, sample_len)
+    for (j, idx) in enumerate(sample_indices)
+        @views copyto!(x_sample, 1 + (j - 1) * d, μ, 1 + (idx - 1) * d, d)
+    end
+    randn!(z_sample)
+    @. x_sample = x_sample + σ_buf * z_sample
+
+    method = Tree(false, prob)
+    ssp = StateSpacePartition(x_sample; method=method)
+    C = maximum(ssp.partitions)
+    do_print && println("Number of clusters: $C")
+
+    x_sample = nothing
+    z_sample = nothing
+
+    sum_z_means = zeros(Float64, d, C)
+    sum_x_means = zeros(Float64, d, C)
+    sum_z2 = zeros(Float64, C)
+    counts = zeros(Int, C)
+
+    @inline function process_dataset!()
+        col = 1
+        while col <= N
+            len = min(chunk, N - col + 1)
+            cols = col:(col + len - 1)
+            x_view = view(x_buf, :, 1:len)
+            z_view = view(z_buf, :, 1:len)
+            μ_view = view(μ, :, cols)
+            labels_view = view(labels_buf, 1:len)
+
+            _draw_noisy!(x_view, z_view, μ_view, σ_buf)
+            _assign_labels!(labels_view, x_view, ssp)
+            Ez_b, Xc_b, z2_b, cnt_b = _batch_stats(labels_view, z_view, x_view, μ_view)
+
+            C_local = size(Ez_b, 2)
+            @inbounds for c in 1:C_local
+                sum_z2[c] += z2_b[c]
+                counts[c] += cnt_b[c]
+            end
+
+            @inbounds for c in 1:C_local
+                n_new = cnt_b[c]
+                n_new == 0 && continue
+                weight = float(n_new)
+                v_sum_z = view(sum_z_means, :, c)
+                v_sum_x = view(sum_x_means, :, c)
+                v_Ez = view(Ez_b, :, c)
+                v_Xc = view(Xc_b, :, c)
+                @inbounds @simd for j in 1:d
+                    v_sum_z[j] += v_Ez[j] * weight
+                    v_sum_x[j] += v_Xc[j] * weight
+                end
+            end
+
+            col += len
+        end
+    end
+
+    process_dataset!()
+
+    Ez_old = zeros(Float64, d, C)
+    Xc_old = zeros(Float64, d, C)
+    Ez_new = similar(Ez_old)
+    Xc_new = similar(Xc_old)
+
+    @inbounds for c in 1:C
+        n = counts[c]
+        if n > 0
+            invn = inv(float(n))
+            @views Ez_old[:, c] .= sum_z_means[:, c] .* invn
+            @views Xc_old[:, c] .= sum_x_means[:, c] .* invn
+        end
+    end
+
+    Δ = 1.0
+    i = 1
+    while Δ > conv_param && i < i_max
+        process_dataset!()
+
+        @inbounds for c in 1:C
+            n_tot = counts[c]
+            if n_tot > 0
+                invn = inv(float(n_tot))
+                @views Ez_new[:, c] .= sum_z_means[:, c] .* invn
+                @views Xc_new[:, c] .= sum_x_means[:, c] .* invn
+            else
+                @views Ez_new[:, c] .= 0
+                @views Xc_new[:, c] .= 0
+            end
+        end
+
+        num = 0.0
+        den = 0.0
+        @inbounds @simd for k in eachindex(Ez_new)
+            diff = @fastmath (Ez_new[k] - Ez_old[k])
+            num += diff * diff
+            den += Ez_new[k] * Ez_new[k]
+        end
+        Δ = num / max(den, 1e-300)
+        do_print && println("Iteration: $i, Δ: $Δ")
+
+        Ez_old, Ez_new = Ez_new, Ez_old
+        Xc_old, Xc_new = Xc_new, Xc_old
+        i += 1
+    end
+
+    Ezz2 = zeros(Float64, C)
+    @inbounds for c in 1:C
+        n = counts[c]
+        Ezz2[c] = n > 0 ? sum_z2[c] / n : NaN
+    end
+
+    return Ez_old, Xc_old, C, ssp, Ezz2, counts
 end
