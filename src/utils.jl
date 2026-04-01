@@ -550,7 +550,7 @@ function decorrelation_metrics(series::AbstractVector)
 end
 
 """
-    estimate_pdf_histogram(data; nbins=nothing, bandwidth=nothing) -> PDFEstimate
+    estimate_pdf_histogram(data; nbins=nothing, bandwidth=nothing, x_range=nothing) -> PDFEstimate
 
 Estimate a univariate PDF using histogram binning with Gaussian smoothing.
 Optimized replacement for KernelDensity.jl's kde() function.
@@ -559,6 +559,7 @@ Optimized replacement for KernelDensity.jl's kde() function.
 - `data`: Vector of samples
 - `nbins`: Number of bins (default: sqrt(n)/2 clamped to 50-200)
 - `bandwidth`: Smoothing bandwidth in data units (default: adaptive based on data range)
+- `x_range`: Optional `(xmin, xmax)` support used for the histogram grid
 
 # Returns
 - `PDFEstimate`: Structure containing grid points and density values
@@ -575,7 +576,10 @@ pdf_est = estimate_pdf_histogram(samples)
 # Plot: plot(pdf_est.x, pdf_est.density)
 ```
 """
-function estimate_pdf_histogram(data::AbstractVector; nbins::Union{Nothing,Int}=nothing, bandwidth::Union{Nothing,Float64}=nothing)
+function estimate_pdf_histogram(data::AbstractVector;
+                                nbins::Union{Nothing,Int}=nothing,
+                                bandwidth::Union{Nothing,Float64}=nothing,
+                                x_range::Union{Nothing,Tuple{Float64,Float64}}=nothing)
     n = length(data)
     n == 0 && return PDFEstimate(Float64[], Float64[])
 
@@ -585,7 +589,11 @@ function estimate_pdf_histogram(data::AbstractVector; nbins::Union{Nothing,Int}=
     end
 
     # Get data range
-    data_min, data_max = extrema(data)
+    if x_range === nothing
+        data_min, data_max = extrema(data)
+    else
+        data_min, data_max = x_range
+    end
     if data_min == data_max
         # Degenerate case: all values are the same
         return PDFEstimate([data_min], [Inf])
@@ -597,15 +605,18 @@ function estimate_pdf_histogram(data::AbstractVector; nbins::Union{Nothing,Int}=
     counts = zeros(Float64, nbins)
 
     # Fill histogram
+    valid_count = 0
     @inbounds for val in data
-        if isfinite(val)
+        if isfinite(val) && data_min <= val <= data_max
             bin_idx = clamp(searchsortedlast(bin_edges, val), 1, nbins)
             counts[bin_idx] += 1
+            valid_count += 1
         end
     end
 
     # Normalize to get density
-    counts ./= (n * bin_width)
+    valid_count == 0 && return PDFEstimate(collect(range(data_min + bin_width/2, data_max - bin_width/2; length=nbins)), zeros(Float64, nbins))
+    counts ./= (valid_count * bin_width)
 
     # Apply Gaussian smoothing if requested
     if bandwidth === nothing
@@ -619,16 +630,23 @@ function estimate_pdf_histogram(data::AbstractVector; nbins::Union{Nothing,Int}=
         kernel_radius = ceil(Int, 3 * sigma_bins)  # 3-sigma cutoff
 
         if kernel_radius > 0
+            kernel = zeros(Float64, 2 * kernel_radius + 1)
+            @inbounds for offset in -kernel_radius:kernel_radius
+                dist = offset * bin_width
+                kernel[offset + kernel_radius + 1] = exp(-0.5 * (dist / bandwidth)^2)
+            end
+            kernel ./= sum(kernel)
+
+            padded = zeros(Float64, nbins + 2 * kernel_radius)
+            @views padded[kernel_radius + 1:kernel_radius + nbins] .= counts
+
             smoothed = zeros(Float64, nbins)
             @inbounds for i in 1:nbins
-                weight_sum = 0.0
-                for j in max(1, i - kernel_radius):min(nbins, i + kernel_radius)
-                    dist = (i - j) * bin_width
-                    weight = exp(-0.5 * (dist / bandwidth)^2)
-                    smoothed[i] += counts[j] * weight
-                    weight_sum += weight
+                total = 0.0
+                for k in eachindex(kernel)
+                    total += padded[i + k - 1] * kernel[k]
                 end
-                smoothed[i] /= weight_sum
+                smoothed[i] = total
             end
             counts = smoothed
         end

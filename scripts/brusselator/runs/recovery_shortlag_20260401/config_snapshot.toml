@@ -1,0 +1,242 @@
+[model]
+B = 1.9
+A = 1.0
+Omega = 10.0
+
+[delta_m_coefficients]
+upper_quantile = 0.99
+grid_ny = 160
+grid_nx = 160
+lower_quantile = 0.01
+padding_fraction = 0.05
+
+[joint_score]
+sampler_progress = false
+sampler_use_gpu = true
+joint_pdf_bins = 80
+max_batches_per_epoch = 128
+stein_regularization = 0.02
+batch_size = 4096
+time_frequencies = [1.0, 2.0, 4.0, 8.0]
+learning_rates = [0.001, 0.0007, 0.0004, 0.0002, 0.0001]
+tD_override = 1.0
+eval_batches_per_lag = 10
+lag_sampling_power = 2.0
+reset_optimizer_each_stage = true
+gpu_id = 1
+lag_fractions = [0.05, 0.1, 0.25, 0.5, 1.0]
+sampler_steps = 120000
+sampler_burn_in = 20000
+contour_levels = 6
+sampler_dt = 0.002
+neurons = [256, 256, 256, 128]
+epochs_schedule = [32, 48, 64, 64, 64]
+learning_rate = 0.00075
+verbose = true
+mean_regularization = 0.001
+noise_scales = [0.2, 0.12, 0.08, 0.05, 0.03]
+sampler_ensembles = 256
+sampler_boundary = 8.0
+seed = 2030
+sampler_resolution = 20
+use_gpu = true
+
+[training]
+max_batches_per_epoch = 0
+stein_regularization = 0.01
+batch_size = 1024
+gpu_id = 1
+neurons = [128, 128]
+epochs_schedule = [60]
+learning_rate = 0.00075
+verbose = true
+mean_regularization = 0.001
+noise_scales = [0.05]
+seed = 2026
+use_gpu = false
+
+[integration]
+use_gpu = true
+resolution = 20
+burn_in = 20000
+progress = true
+dt = 0.001
+n_ensembles = 256
+seed = 2027
+n_steps = 220000
+
+[data_generation]
+burnin_steps = 100000
+n_steps_timeseries = 400000
+burnin_stationary = 40000
+resolution_timeseries = 10
+ensemble_stationary = 128
+verbose = true
+dt = 0.001
+seed = 2026
+n_steps_stationary = 160000
+resolution_stationary = 20
+
+[delta_m_observables]
+rbf_padding_fraction = 0.02
+rbf_grid_ny = 3
+include_quartics = true
+rbf_grid_nx = 3
+rbf_lower_quantile = 0.05
+rbf_upper_quantile = 0.95
+include_rbfs = true
+rbf_width_scale = 1.0
+include_cubics = true
+
+[delta_m_rollout]
+burn_in = 20000
+dt = 0.001
+progress = true
+metric_time_horizon = 6.0
+evaluation_tD_override = 10.0
+grid_ny = 160
+resolution = 10
+grid_margin_fraction = 0.1
+n_ensembles = 192
+seed = 2035
+grid_nx = 160
+n_steps = 220000
+
+[phi_sigma]
+use_stein_correction = false
+batch_size = 8192
+q_min_prob = 0.0002
+finite_dt_correction_mode = "per_state"
+finite_dt_correction = false
+generator_perturb_scale = 0.0
+enforce_psd_symmetric = true
+perturb_scale_override = -1.0
+regularization = 1.0e-6
+seed = 2028
+use_gpu = false
+
+[run]
+name = "recovery_shortlag"
+stages = ["generate_data", "train_score", "estimate_phi_sigma", "observed_residuals", "overview", "joint_score", "delta_m", "delta_m_rollout", "delta_m_coefficients"]
+force = false
+
+[delta_m]
+smoothness_grid_ny = 16
+use_global_target_scale = true
+max_batches_per_epoch = 96
+batch_size = 4096
+smoothness_padding_fraction = 0.04
+candidate_mean_delta_ratio_max = 0.25
+divergence_regularization = 0.05
+psd_margin_regularization = 0.05
+tD_override = 1.0
+magnitude_regularization = 0.001
+check_samples = 4096
+candidate_coordinate_tolerance_fraction = 0.0
+gpu_id = 1
+eps_floor = 0.0001
+grid_ny = 140
+divergence_mode = "autodiff"
+neurons = [256, 256, 256]
+eval_pairs_per_lag = 20000
+learning_rate = 0.0003
+verbose = true
+smoothness_upper_quantile = 0.99
+mean_regularization = 0.08
+lag_step_stride = 1
+epochs = 24
+grid_margin_fraction = 0.08
+psd_margin_floor = 0.02
+feature_stat_samples = 40000
+smoothness_lower_quantile = 0.01
+seed = 2034
+candidate_quadratics_improvement_target = 0.1
+grid_nx = 140
+smoothness_grid_nx = 16
+base_residual_scales = [0.75, 0.35, 0.75, 0.35]
+use_gpu = true
+
+    [[delta_m.schedule]]
+    epochs = 18
+    name = "stabilize"
+    coordinate_weight = 0.1
+    learning_rate = 0.0003
+    polynomial_weight = 1.5
+    rbf_weight = 1.5
+    [[delta_m.schedule]]
+    epochs = 24
+    name = "balance"
+    coordinate_weight = 0.05
+    learning_rate = 0.0002
+    polynomial_weight = 1.6
+    rbf_weight = 1.6
+    [[delta_m.schedule]]
+    epochs = 18
+    name = "refine"
+    coordinate_weight = 0.05
+    learning_rate = 0.0001
+    polynomial_weight = 1.8
+    rbf_weight = 1.8
+
+    [[delta_m.candidates]]
+    name = "rich_smooth"
+    anchor_regularization = 0.0015
+    smoothness_regularization = 0.01
+    residual_scale_factor = 1.0
+    [[delta_m.candidates]]
+    name = "rich_flexible"
+    anchor_regularization = 0.0005
+    smoothness_regularization = 0.002
+    residual_scale_factor = 1.25
+    [[delta_m.candidates]]
+    name = "anchored_safe"
+    anchor_regularization = 0.003
+    smoothness_regularization = 0.015
+    residual_scale_factor = 0.9
+
+[paths]
+diagnostics_h5 = "metrics/diagnostics.h5"
+delta_m_rollout_h5 = "metrics/delta_m_rollout.h5"
+latest_run_marker = "latest_run.txt"
+joint_score_pdf = "figures/joint_score.pdf"
+overview_png = "figures/overview.png"
+dataset_h5 = "data/dataset.h5"
+overview_pdf = "figures/overview.pdf"
+joint_score_h5 = "metrics/joint_score.h5"
+delta_m_pdf = "figures/delta_m.pdf"
+score_model_bson = "models/score_model.bson"
+delta_m_coefficients_pdf = "figures/delta_m_coefficients.pdf"
+observed_residuals_png = "figures/observed_residuals.png"
+delta_m_model_bson = "models/delta_m_model.bson"
+summary_toml = "run_summary.toml"
+delta_m_coefficients_png = "figures/delta_m_coefficients.png"
+observed_residuals_pdf = "figures/observed_residuals.pdf"
+phi_sigma_h5 = "metrics/phi_sigma.h5"
+delta_m_h5 = "metrics/delta_m.h5"
+joint_score_png = "figures/joint_score.png"
+delta_m_rollout_png = "figures/delta_m_rollout.png"
+delta_m_rollout_pdf = "figures/delta_m_rollout.pdf"
+runs_dir = "runs"
+delta_m_coefficients_h5 = "metrics/delta_m_coefficients.h5"
+delta_m_png = "figures/delta_m.png"
+observed_residuals_h5 = "metrics/observed_residuals.h5"
+config_snapshot = "config_snapshot.toml"
+joint_score_model_bson = "models/joint_score_model.bson"
+training_h5 = "metrics/training.h5"
+
+[diagnostics]
+plot_window = 3000
+metric_time_horizon = 6.0
+maxlag = 3000
+phase_points = 5000
+
+[observed_residuals]
+lag_step_stride = 1
+max_lag_fraction = 1.0
+empirical_smoothing_window_radius = 3
+empirical_smoothing_degree = 2
+tD_override = 1.0
+include_zero_lag = true
+batch_size = 8192
+cdot_mode = "dual"
+use_gpu = true

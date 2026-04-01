@@ -1,0 +1,114 @@
+
+[stages.estimate_phi_sigma]
+status = "completed"
+n_states = 2950
+regularization_shift = 0.0
+stein_identity_error = 0.2490291441418859
+phi_stein_gap = 0.08776204604734576
+phi_neg_cdot_gap = 0.0
+phi_sigma_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/phi_sigma.h5"
+elapsed_seconds = 21.342046976089478
+
+[stages.delta_m]
+coordinates_rollout_improvement = -0.04699692729337168
+delta_m_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m.pdf"
+coordinates_rollout_relative_rmse = 0.041183969000373674
+status = "completed"
+training_time_seconds = 1377.3145899772644
+aggregate_relative_rmse = 0.25960446058394415
+quadratics_rollout_relative_rmse = 0.12719019815328064
+mean_delta_norm = 0.08037183879495877
+elapsed_seconds = 1651.588084936142
+delta_m_model_bson = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/models/delta_m_model.bson"
+selected_candidate_name = "flexible"
+quadratics_relative_rmse = 0.220104162547349
+delta_m_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/delta_m.h5"
+min_lambda_samples = 0.0010259002447128296
+delta_m_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m.png"
+quadratics_rollout_improvement = 0.14821589845540384
+coordinates_relative_rmse = 0.36319992791237465
+
+[stages.delta_m_rollout]
+delta_m_rollout_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/delta_m_rollout.h5"
+quadratics_improvement = 0.14850447728021843
+status = "completed"
+elapsed_seconds = 209.2109649181366
+quadratics_baseline_relative_rmse = 0.14943384438441873
+quadratics_relative_rmse = 0.12724224943613713
+coordinates_improvement = -0.04701185930825491
+coordinates_baseline_relative_rmse = 0.0393411302500668
+delta_m_rollout_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m_rollout.pdf"
+delta_m_rollout_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m_rollout.png"
+coordinates_relative_rmse = 0.04119062993041068
+
+[stages.delta_m_coefficients]
+drift_weighted_rmse_baseline = 1.5767595913104562
+diffusion_weighted_rmse_baseline = 0.33612868743973795
+status = "completed"
+delta_m_coefficients_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m_coefficients.pdf"
+elapsed_seconds = 34.46664094924927
+diffusion_weighted_rmse_model = 0.4719195452856975
+coordinate_affine_rel_rmse_mean = 0.9449017202937787
+coefficient_verdict = "worsened"
+delta_m_coefficients_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m_coefficients.png"
+drift_weighted_rmse_model = 2.0518481398680137
+delta_m_coefficients_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/delta_m_coefficients.h5"
+
+[stages.observed_residuals]
+coordinate_zero_lag_norm = 0.09060511061965763
+status = "completed"
+n_lags = 101
+observed_residuals_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/observed_residuals.h5"
+observed_residuals_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/observed_residuals.pdf"
+observables = ["Coordinates", "Centered Quadratics", "Centered Cubics", "Centered Quartics", "RBF Probes"]
+max_residual_abs = 2.764688851800554
+observed_residuals_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/observed_residuals.png"
+max_cdot_relative_error = 0.3480110359181169
+elapsed_seconds = 40.13050317764282
+
+[stages.joint_score]
+mean_conditional_score_norm = 4.997780463535603
+joint_score_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/joint_score.pdf"
+max_stein_error = 1.0027596003573302
+max_conditional_manual_consistency_error = 0.0
+joint_score_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/joint_score.h5"
+tD = 1.0
+status = "completed"
+training_time_seconds = 93.63144302368164
+mean_projection_kl = 0.12008447860414191
+elapsed_seconds = 417.3967430591583
+joint_score_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/joint_score.png"
+max_first_block_stein_error = 0.3938102563338394
+joint_score_model_bson = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/models/joint_score_model.bson"
+[run]
+name = "recovery_audit_20260401"
+created_at = "2026-04-01T00:50:15.270"
+source_config = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/brusselator_pipeline.toml"
+
+[artifacts]
+diagnostics_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/diagnostics.h5"
+delta_m_rollout_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/delta_m_rollout.h5"
+joint_score_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/joint_score.pdf"
+overview_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/overview.png"
+dataset_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/data/dataset.h5"
+joint_score_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/joint_score.h5"
+overview_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/overview.pdf"
+delta_m_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m.pdf"
+score_model_bson = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/models/score_model.bson"
+delta_m_coefficients_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m_coefficients.pdf"
+observed_residuals_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/observed_residuals.png"
+delta_m_model_bson = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/models/delta_m_model.bson"
+delta_m_coefficients_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m_coefficients.png"
+observed_residuals_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/observed_residuals.pdf"
+phi_sigma_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/phi_sigma.h5"
+delta_m_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/delta_m.h5"
+joint_score_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/joint_score.png"
+run_dir = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401"
+delta_m_rollout_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m_rollout.png"
+delta_m_rollout_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m_rollout.pdf"
+delta_m_coefficients_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/delta_m_coefficients.h5"
+delta_m_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/figures/delta_m.png"
+observed_residuals_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/observed_residuals.h5"
+config_snapshot = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/config_snapshot.toml"
+joint_score_model_bson = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/models/joint_score_model.bson"
+training_h5 = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/brusselator/runs/recovery_audit_20260401/metrics/training.h5"

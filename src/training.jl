@@ -104,6 +104,57 @@ function _weighted_mse(Ŷ::AbstractMatrix, Y::AbstractMatrix, w::AbstractVector
     return (sum(col .* reshape(w, 1, :)) / (sum(w) * D)) |> eltype(Y)
 end
 
+@inline function _weighted_column_mean(Y::AbstractMatrix, w::AbstractVector)
+    @assert size(Y, 2) == length(w)
+    return (Y * reshape(w, :, 1)) ./ sum(w)
+end
+
+function _score_moment_penalty(ϵ̂::AbstractMatrix,
+                               X::AbstractMatrix,
+                               σ::Real;
+                               w::Union{Nothing,AbstractVector}=nothing,
+                               mean_weight::Real=0,
+                               stein_weight::Real=0)
+    mean_weight == 0 && stein_weight == 0 && return zero(eltype(X))
+
+    T = eltype(X)
+    D = size(X, 1)
+    score = @. -(ϵ̂) / T(σ)
+
+    if w === nothing
+        B = size(X, 2)
+        mean_score = vec(mean(score; dims=2))
+        stein_matrix = (score * transpose(X)) ./ T(B)
+    else
+        weights = vec(w)
+        mean_score = vec(_weighted_column_mean(score, weights))
+        stein_matrix = (score .* reshape(weights, 1, :)) * transpose(X) ./ T(sum(weights))
+    end
+
+    penalty = zero(T)
+    if mean_weight != 0
+        penalty += T(mean_weight) * sum(abs2, mean_score) / T(D)
+    end
+    if stein_weight != 0
+        use_gpu = !(X isa Array) && _cuda_functional()
+        I_D = Flux.Zygote.ignore() do
+            _to_device(Matrix{T}(I, D, D); use_gpu=use_gpu)
+        end
+        penalty += T(stein_weight) * sum(abs2, stein_matrix + I_D) / T(D * D)
+    end
+    return penalty
+end
+
+@inline function _epoch_batch_count(loader, max_batches_per_epoch)
+    total_batches = length(loader)
+    if max_batches_per_epoch === nothing
+        return total_batches
+    end
+    requested = Int(max_batches_per_epoch)
+    requested <= 0 && return total_batches
+    return min(total_batches, requested)
+end
+
 
 ############################
 #  Training loops (Flux)   #
@@ -119,15 +170,17 @@ layer sizes are automatically inferred as the system dimension `D = size(obs,1)`
 """
 function train(obs, n_epochs, batch_size, neurons::Vector{Int}, σ::Real;
                opt=Flux.Adam(0.001), activation=_swish, last_activation=identity,
-               use_gpu=true, verbose=false)
+               use_gpu=true, verbose=false,
+               moment_weight_mean::Real=0, moment_weight_stein::Real=0,
+               max_batches_per_epoch=nothing)
 
-    device = (use_gpu && CUDA.functional()) ? gpu : cpu
     if verbose
-        println("Using " * (device === gpu ? "GPU" : "CPU"))
+        println("Using " * _device_name(use_gpu))
     end
 
+    use_gpu_eff = use_gpu && _cuda_functional()
     D = size(obs, 1)
-    nn = _build_mlp_from_hidden(D, neurons; activation=activation, last_activation=last_activation) |> device |> Flux.f32
+    nn = _to_device(Flux.f32(_build_mlp_from_hidden(D, neurons; activation=activation, last_activation=last_activation)); use_gpu=use_gpu_eff)
     opt_state = Flux.setup(opt, nn)
 
     losses = Float32[]
@@ -135,19 +188,28 @@ function train(obs, n_epochs, batch_size, neurons::Vector{Int}, σ::Real;
     verbose && (p = Progress(n_epochs; desc="Epochs", showspeed=false))
     for e in 1:n_epochs
         X, Z = _generate_data(obsf, σ)
-        Xd, Zd = device(X), device(Z)
+        Xd, Zd = _to_device(X; use_gpu=use_gpu_eff), _to_device(Z; use_gpu=use_gpu_eff)
         _ = nn(@view Xd[:, 1:min(batch_size, size(Xd,2))])  # warmup
         loader = Flux.DataLoader((Xd, Zd), batchsize=batch_size, shuffle=true)
+        n_batches = _epoch_batch_count(loader, max_batches_per_epoch)
 
         ep = zero(Float32)
-        for (Xb, Zb) in loader
+        for (batch_idx, (Xb, Zb)) in enumerate(loader)
+            batch_idx > n_batches && break
             loss, grads = Flux.withgradient(nn) do m
-                Flux.mse(m(Xb), Zb)
+                pred = m(Xb)
+                Flux.mse(pred, Zb) + _score_moment_penalty(
+                    pred,
+                    Xb,
+                    σ;
+                    mean_weight=moment_weight_mean,
+                    stein_weight=moment_weight_stein,
+                )
             end
             Flux.update!(opt_state, nn, grads[1])
             ep += Float32(loss)
         end
-        push!(losses, ep / length(loader))
+        push!(losses, ep / n_batches)
         verbose && next!(p)
     end
     verbose && finish!(p)
@@ -254,14 +316,16 @@ Continue training an existing ε-network with fixed σ.
 - `(nn, losses, opt_state)`: Trained network, loss history, and optimizer state.
 """
 function train(obs, n_epochs, batch_size, nn::Chain, σ::Real;
-               opt=Flux.Adam(0.001), use_gpu=true, verbose=false, opt_state=nothing)
+               opt=Flux.Adam(0.001), use_gpu=true, verbose=false, opt_state=nothing,
+               moment_weight_mean::Real=0, moment_weight_stein::Real=0,
+               max_batches_per_epoch=nothing)
 
-    device = (use_gpu && CUDA.functional()) ? gpu : cpu
     if verbose
-        println("Using " * (device === gpu ? "GPU" : "CPU"))
+        println("Using " * _device_name(use_gpu))
     end
 
-    nn = nn |> device |> Flux.f32
+    use_gpu_eff = use_gpu && _cuda_functional()
+    nn = _to_device(Flux.f32(nn); use_gpu=use_gpu_eff)
 
     # Use existing optimizer state if provided, otherwise create new
     if opt_state === nothing
@@ -274,18 +338,27 @@ function train(obs, n_epochs, batch_size, nn::Chain, σ::Real;
     verbose && (p = Progress(n_epochs; desc="Epochs", showspeed=false))
     for e in 1:n_epochs
         X, Z = _generate_data(obsf, σ)
-        Xd, Zd = device(X), device(Z)
+        Xd, Zd = _to_device(X; use_gpu=use_gpu_eff), _to_device(Z; use_gpu=use_gpu_eff)
         _ = nn(@view Xd[:, 1:min(batch_size, size(Xd,2))])
         loader = Flux.DataLoader((Xd, Zd), batchsize=batch_size, shuffle=true)
+        n_batches = _epoch_batch_count(loader, max_batches_per_epoch)
         ep = zero(Float32)
-        for (Xb, Zb) in loader
+        for (batch_idx, (Xb, Zb)) in enumerate(loader)
+            batch_idx > n_batches && break
             loss, grads = Flux.withgradient(nn) do m
-                Flux.mse(m(Xb), Zb)
+                pred = m(Xb)
+                Flux.mse(pred, Zb) + _score_moment_penalty(
+                    pred,
+                    Xb,
+                    σ;
+                    mean_weight=moment_weight_mean,
+                    stein_weight=moment_weight_stein,
+                )
             end
             Flux.update!(opt_state, nn, grads[1])
             ep += Float32(loss)
         end
-        push!(losses, ep / length(loader))
+        push!(losses, ep / n_batches)
         verbose && next!(p)
     end
     verbose && finish!(p)
@@ -302,38 +375,49 @@ sizes are inferred from `size(X,1)`.
 """
 function train(obs_tuple, n_epochs, batch_size, neurons; 
                opt=Flux.Adam(0.001), activation=_swish, last_activation=identity,
-               use_gpu=true, verbose=false)
+               use_gpu=true, verbose=false,
+               moment_weight_mean::Real=0, moment_weight_stein::Real=0, σ::Real=1,
+               max_batches_per_epoch=nothing)
 
     X, Z = obs_tuple
-    device = (use_gpu && CUDA.functional()) ? gpu : cpu
     if verbose
-        println("Using " * (device === gpu ? "GPU" : "CPU"))
+        println("Using " * _device_name(use_gpu))
     end
 
+    use_gpu_eff = use_gpu && _cuda_functional()
     D = size(X, 1)
-    nn = _build_mlp_from_hidden(D, neurons; activation=activation, last_activation=last_activation) |> device |> Flux.f32
+    nn = _to_device(Flux.f32(_build_mlp_from_hidden(D, neurons; activation=activation, last_activation=last_activation)); use_gpu=use_gpu_eff)
     opt_state = Flux.setup(opt, nn)
-    Xd, Zd = device(Float32.(X)), device(Float32.(Z))
+    Xd, Zd = _to_device(Float32.(X); use_gpu=use_gpu_eff), _to_device(Float32.(Z); use_gpu=use_gpu_eff)
     _ = nn(@view Xd[:, 1:min(batch_size, size(Xd,2))])
     loader = Flux.DataLoader((Xd, Zd), batchsize=batch_size, shuffle=true)
+    n_batches = _epoch_batch_count(loader, max_batches_per_epoch)
 
     losses = Float32[]
     verbose && (p = Progress(n_epochs; desc="Epochs", showspeed=false))
     for e in 1:n_epochs
         ep = zero(Float32)
-        for (Xb, Zb) in loader
+        for (batch_idx, (Xb, Zb)) in enumerate(loader)
+            batch_idx > n_batches && break
             loss, grads = Flux.withgradient(nn) do m
-                Flux.mse(m(Xb), Zb)
+                pred = m(Xb)
+                Flux.mse(pred, Zb) + _score_moment_penalty(
+                    pred,
+                    Xb,
+                    σ;
+                    mean_weight=moment_weight_mean,
+                    stein_weight=moment_weight_stein,
+                )
             end
             Flux.update!(opt_state, nn, grads[1])
             ep += Float32(loss)
         end
-        push!(losses, ep / length(loader))
+        push!(losses, ep / n_batches)
         verbose && next!(p)
     end
     verbose && finish!(p)
 
-    return nn, losses
+    return nn, losses, opt_state
 end
 
 """
@@ -345,37 +429,50 @@ function train(obs_tuple::Tuple{<:AbstractMatrix,<:AbstractMatrix},
                n_epochs::Integer,
                batch_size::Integer,
                nn::Chain;
-               opt=Flux.Adam(0.001), use_gpu=true, verbose=false)
+               opt=Flux.Adam(0.001), use_gpu=true, verbose=false, opt_state=nothing,
+               moment_weight_mean::Real=0, moment_weight_stein::Real=0, σ::Real=1,
+               max_batches_per_epoch=nothing)
 
     X, Z = obs_tuple
-    device = (use_gpu && CUDA.functional()) ? gpu : cpu
     if verbose
-        println("Using " * (device === gpu ? "GPU" : "CPU"))
+        println("Using " * _device_name(use_gpu))
     end
 
-    nn = nn |> device |> Flux.f32
-    opt_state = Flux.setup(opt, nn)
-    Xd, Zd = device(Float32.(X)), device(Float32.(Z))
+    use_gpu_eff = use_gpu && _cuda_functional()
+    nn = _to_device(Flux.f32(nn); use_gpu=use_gpu_eff)
+    if opt_state === nothing
+        opt_state = Flux.setup(opt, nn)
+    end
+    Xd, Zd = _to_device(Float32.(X); use_gpu=use_gpu_eff), _to_device(Float32.(Z); use_gpu=use_gpu_eff)
     _ = nn(@view Xd[:, 1:min(batch_size, size(Xd,2))])
     loader = Flux.DataLoader((Xd, Zd), batchsize=batch_size, shuffle=true)
+    n_batches = _epoch_batch_count(loader, max_batches_per_epoch)
 
     losses = Float32[]
     verbose && (p = Progress(n_epochs; desc="Epochs", showspeed=false))
     for e in 1:n_epochs
         ep = zero(Float32)
-        for (Xb, Zb) in loader
+        for (batch_idx, (Xb, Zb)) in enumerate(loader)
+            batch_idx > n_batches && break
             loss, grads = Flux.withgradient(nn) do m
-                Flux.mse(m(Xb), Zb)
+                pred = m(Xb)
+                Flux.mse(pred, Zb) + _score_moment_penalty(
+                    pred,
+                    Xb,
+                    σ;
+                    mean_weight=moment_weight_mean,
+                    stein_weight=moment_weight_stein,
+                )
             end
             Flux.update!(opt_state, nn, grads[1])
             ep += Float32(loss)
         end
-        push!(losses, ep / length(loader))
+        push!(losses, ep / n_batches)
         verbose && next!(p)
     end
     verbose && finish!(p)
 
-    return nn, losses
+    return nn, losses, opt_state
 end
 
 """
@@ -391,40 +488,52 @@ function train(obs_tuple::Tuple{<:AbstractMatrix,<:AbstractMatrix,<:AbstractVect
                n_epochs::Integer,
                batch_size::Integer,
                neurons;
-               opt=Flux.Adam(0.001), activation=swish, last_activation=identity,
-               use_gpu=true, verbose=false)
+               opt=Flux.Adam(0.001), activation=_swish, last_activation=identity,
+               use_gpu=true, verbose=false,
+               moment_weight_mean::Real=0, moment_weight_stein::Real=0, σ::Real=1,
+               max_batches_per_epoch=nothing)
 
     X, Z, w = obs_tuple
-    device = (use_gpu && CUDA.functional()) ? gpu : cpu
     if verbose
-        println("Using " * (device === gpu ? "GPU" : "CPU"))
+        println("Using " * _device_name(use_gpu))
     end
 
+    use_gpu_eff = use_gpu && _cuda_functional()
     D = size(X, 1)
-    nn = _build_mlp_from_hidden(D, neurons; activation=activation, last_activation=last_activation) |> device |> Flux.f32
+    nn = _to_device(Flux.f32(_build_mlp_from_hidden(D, neurons; activation=activation, last_activation=last_activation)); use_gpu=use_gpu_eff)
     opt_state = Flux.setup(opt, nn)
-    Xd, Zd = device(Float32.(X)), device(Float32.(Z))
-    wd = device(Float32.(w))
+    Xd, Zd = _to_device(Float32.(X); use_gpu=use_gpu_eff), _to_device(Float32.(Z); use_gpu=use_gpu_eff)
+    wd = _to_device(Float32.(w); use_gpu=use_gpu_eff)
     _ = nn(@view Xd[:, 1:min(batch_size, size(Xd,2))])
     loader = Flux.DataLoader((Xd, Zd, wd), batchsize=batch_size, shuffle=true)
+    n_batches = _epoch_batch_count(loader, max_batches_per_epoch)
 
     losses = Float32[]
     verbose && (p = Progress(n_epochs; desc="Epochs", showspeed=false))
     for e in 1:n_epochs
         ep = zero(Float32)
-        for (Xb, Zb, wb) in loader
+        for (batch_idx, (Xb, Zb, wb)) in enumerate(loader)
+            batch_idx > n_batches && break
             loss, grads = Flux.withgradient(nn) do m
-                _weighted_mse(m(Xb), Zb, vec(wb))
+                pred = m(Xb)
+                _weighted_mse(pred, Zb, vec(wb)) + _score_moment_penalty(
+                    pred,
+                    Xb,
+                    σ;
+                    w=vec(wb),
+                    mean_weight=moment_weight_mean,
+                    stein_weight=moment_weight_stein,
+                )
             end
             Flux.update!(opt_state, nn, grads[1])
             ep += Float32(loss)
         end
-        push!(losses, ep / length(loader))
+        push!(losses, ep / n_batches)
         verbose && next!(p)
     end
     verbose && finish!(p)
 
-    return nn, losses
+    return nn, losses, opt_state
 end
 
 """
@@ -437,38 +546,52 @@ function train(obs_tuple::Tuple{<:AbstractMatrix,<:AbstractMatrix,<:AbstractVect
                n_epochs::Integer,
                batch_size::Integer,
                nn::Chain;
-               opt=Flux.Adam(0.001), use_gpu=true, verbose=false)
+               opt=Flux.Adam(0.001), use_gpu=true, verbose=false, opt_state=nothing,
+               moment_weight_mean::Real=0, moment_weight_stein::Real=0, σ::Real=1,
+               max_batches_per_epoch=nothing)
 
     X, Z, w = obs_tuple
-    device = (use_gpu && CUDA.functional()) ? gpu : cpu
     if verbose
-        println("Using " * (device === gpu ? "GPU" : "CPU"))
+        println("Using " * _device_name(use_gpu))
     end
 
-    nn = nn |> device |> Flux.f32
-    opt_state = Flux.setup(opt, nn)
-    Xd, Zd = device(Float32.(X)), device(Float32.(Z))
-    wd = device(Float32.(w))
+    use_gpu_eff = use_gpu && _cuda_functional()
+    nn = _to_device(Flux.f32(nn); use_gpu=use_gpu_eff)
+    if opt_state === nothing
+        opt_state = Flux.setup(opt, nn)
+    end
+    Xd, Zd = _to_device(Float32.(X); use_gpu=use_gpu_eff), _to_device(Float32.(Z); use_gpu=use_gpu_eff)
+    wd = _to_device(Float32.(w); use_gpu=use_gpu_eff)
     _ = nn(@view Xd[:, 1:min(batch_size, size(Xd,2))])
     loader = Flux.DataLoader((Xd, Zd, wd), batchsize=batch_size, shuffle=true)
+    n_batches = _epoch_batch_count(loader, max_batches_per_epoch)
 
     losses = Float32[]
     verbose && (p = Progress(n_epochs; desc="Epochs", showspeed=false))
     for e in 1:n_epochs
         ep = zero(Float32)
-        for (Xb, Zb, wb) in loader
+        for (batch_idx, (Xb, Zb, wb)) in enumerate(loader)
+            batch_idx > n_batches && break
             loss, grads = Flux.withgradient(nn) do m
-                _weighted_mse(m(Xb), Zb, vec(wb))
+                pred = m(Xb)
+                _weighted_mse(pred, Zb, vec(wb)) + _score_moment_penalty(
+                    pred,
+                    Xb,
+                    σ;
+                    w=vec(wb),
+                    mean_weight=moment_weight_mean,
+                    stein_weight=moment_weight_stein,
+                )
             end
             Flux.update!(opt_state, nn, grads[1])
             ep += Float32(loss)
         end
-        push!(losses, ep / length(loader))
+        push!(losses, ep / n_batches)
         verbose && next!(p)
     end
     verbose && finish!(p)
 
-    return nn, losses
+    return nn, losses, opt_state
 end
 
 """
@@ -529,24 +652,52 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
                rademacher::Bool=true,
                jacobian::Bool=false,
                nn::Union{Flux.Chain,Nothing}=nothing,
-               opt_state=nothing)
+               opt_state=nothing,
+               moment_weight_mean::Real=0,
+               moment_weight_stein::Real=0,
+               max_batches_per_epoch=nothing)
 
     opt = Flux.Adam(Float32(lr))
-    device = (use_gpu && CUDA.functional()) ? gpu : cpu
+    use_gpu_eff = use_gpu && _cuda_functional()
 
     if !preprocessing
         if nn === nothing
-            nn, losses, opt_state = train(obs, n_epochs, batch_size, neurons, σ; opt=opt, use_gpu=use_gpu, verbose=verbose)
+            nn, losses, opt_state = train(
+                obs,
+                n_epochs,
+                batch_size,
+                neurons,
+                σ;
+                opt=opt,
+                use_gpu=use_gpu,
+                verbose=verbose,
+                moment_weight_mean=moment_weight_mean,
+                moment_weight_stein=moment_weight_stein,
+                max_batches_per_epoch=max_batches_per_epoch,
+            )
         else
             if verbose && !isempty(neurons)
                 println("Existing nn provided; ignoring neurons and continuing training.")
             end
-            nn, losses, opt_state = train(obs, n_epochs, batch_size, nn, σ; opt=opt, use_gpu=use_gpu, verbose=verbose, opt_state=opt_state)
+            nn, losses, opt_state = train(
+                obs,
+                n_epochs,
+                batch_size,
+                nn,
+                σ;
+                opt=opt,
+                use_gpu=use_gpu,
+                verbose=verbose,
+                opt_state=opt_state,
+                moment_weight_mean=moment_weight_mean,
+                moment_weight_stein=moment_weight_stein,
+                max_batches_per_epoch=max_batches_per_epoch,
+            )
         end
         div_fn = if divergence
-            let nn=nn, device=device, probes=probes, rademacher=rademacher, σ=σ
+            let nn=nn, probes=probes, rademacher=rademacher, σ=σ, use_gpu_eff=use_gpu_eff
                 X -> begin
-                    Xd = device(Float32.(X))
+                    Xd = _to_device(Float32.(X); use_gpu=use_gpu_eff)
                     Array(_divergence_from_eps(nn, Xd; σ=σ, probes=probes, rademacher=rademacher))
                 end
             end
@@ -554,9 +705,9 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
             X -> zeros(eltype(X), 1, size(X,2))
         end
         jac_fn = if jacobian
-            let nn=nn, device=device, σ=σ
+            let nn=nn, σ=σ, use_gpu_eff=use_gpu_eff
                 X -> begin
-                    Xd = device(Float32.(X))
+                    Xd = _to_device(Float32.(X); use_gpu=use_gpu_eff)
                     Array(_jacobian_score(nn, Xd; σ=σ))
                 end
             end
@@ -570,17 +721,42 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
         X, Z = _dataset_from_kgmm(res, σ)
         w    = Float32.(res.counts)
         if nn === nothing
-            nn, losses = train((X, Z, w), n_epochs, batch_size, neurons; opt=opt, use_gpu=use_gpu, verbose=verbose)
+            nn, losses, opt_state = train(
+                (X, Z, w),
+                n_epochs,
+                batch_size,
+                neurons;
+                opt=opt,
+                use_gpu=use_gpu,
+                verbose=verbose,
+                σ=σ,
+                moment_weight_mean=moment_weight_mean,
+                moment_weight_stein=moment_weight_stein,
+                max_batches_per_epoch=max_batches_per_epoch,
+            )
         else
             if verbose && !isempty(neurons)
                 println("Existing nn provided; ignoring neurons and continuing training on kgmm dataset.")
             end
-            nn, losses = train((X, Z, w), n_epochs, batch_size, nn; opt=opt, use_gpu=use_gpu, verbose=verbose)
+            nn, losses, opt_state = train(
+                (X, Z, w),
+                n_epochs,
+                batch_size,
+                nn;
+                opt=opt,
+                use_gpu=use_gpu,
+                verbose=verbose,
+                opt_state=opt_state,
+                σ=σ,
+                moment_weight_mean=moment_weight_mean,
+                moment_weight_stein=moment_weight_stein,
+                max_batches_per_epoch=max_batches_per_epoch,
+            )
         end
         div_fn = if divergence
-            let nn=nn, device=device, probes=probes, rademacher=rademacher, σ=σ
+            let nn=nn, probes=probes, rademacher=rademacher, σ=σ, use_gpu_eff=use_gpu_eff
                 Xq -> begin
-                    Xd = device(Float32.(Xq))
+                    Xd = _to_device(Float32.(Xq); use_gpu=use_gpu_eff)
                     Array(_divergence_from_eps(nn, Xd; σ=σ, probes=probes, rademacher=rademacher))
                 end
             end
@@ -588,15 +764,15 @@ function train(obs::AbstractMatrix; preprocessing::Bool=false,
             Xq -> zeros(eltype(Xq), 1, size(Xq,2))
         end
         jac_fn = if jacobian
-            let nn=nn, device=device, σ=σ
+            let nn=nn, σ=σ, use_gpu_eff=use_gpu_eff
                 Xq -> begin
-                    Xd = device(Float32.(Xq))
+                    Xd = _to_device(Float32.(Xq); use_gpu=use_gpu_eff)
                     Array(_jacobian_score(nn, Xd; σ=σ))
                 end
             end
         else
             Xq -> zeros(eltype(Xq), size(Xq,1), size(Xq,1), size(Xq,2))
         end
-        return nn, losses, Float32[], div_fn, jac_fn, res, nothing
+        return nn, losses, Float32[], div_fn, jac_fn, res, opt_state
     end
 end

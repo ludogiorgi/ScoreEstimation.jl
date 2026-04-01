@@ -17,3 +17,19 @@
 
 # Ignore ClustGen repository
 ClustGen/
+
+# Ignore ScoreUNet1D repository
+ScoreUNet1D.jl/
+
+# Ignore large run output directories (generated data, metrics, figures, checkpoints)
+scripts/*/runs/*/metrics/
+scripts/*/runs/*/data/
+scripts/*/runs/*/figures/
+scripts/*/runs/*/checkpoints/
+
+# Ignore HDF5, PDF, and image files in runs (but keep .toml configs)
+scripts/*/runs/**/*.h5
+scripts/*/runs/**/*.pdf
+scripts/*/runs/**/*.png
+scripts/*/runs/**/*.jpg
+scripts/*/runs/**/*.jpeg
