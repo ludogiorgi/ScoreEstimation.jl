@@ -51,8 +51,8 @@ training_target_uncorrelated = 1000000
 training_seed_stride_multiplier = 1
 
 [usage]
-normal_command = "julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml"
-nohup_command = "nohup julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml > /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/nohup.out 2>&1 &"
+normal_command = "julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml"
+nohup_command = "nohup julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml > /home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/nohup.out 2>&1 &"
 
 [execution]
 stages = ["fit_score", "fit_phi_sigma", "estimate_residuals"]

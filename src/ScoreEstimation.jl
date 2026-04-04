@@ -9,42 +9,23 @@ using Random
 using Base.Threads
 using Statistics
 using BSON
+using CUDA
 using Flux
 using HDF5
 using ProgressMeter
 using KernelDensity
 
-const _CUDA_MODULE = Ref{Any}(nothing)
-const _CUDA_LOAD_ATTEMPTED = Ref(false)
-
 function _cuda_module()
-    if _CUDA_LOAD_ATTEMPTED[] && _CUDA_MODULE[] === nothing
-        return nothing
-    end
-    if _CUDA_MODULE[] !== nothing
-        return _CUDA_MODULE[]
-    end
-
-    _CUDA_LOAD_ATTEMPTED[] = true
-    try
-        @eval import CUDA
-        _CUDA_MODULE[] = CUDA
-    catch err
-        @debug "CUDA could not be loaded; GPU features will be disabled" exception=(err, catch_backtrace())
-        _CUDA_MODULE[] = nothing
-    end
-    return _CUDA_MODULE[]
+    return CUDA
 end
 
 function _cuda_functional()
-    cuda = _cuda_module()
-    return cuda !== nothing && Base.invokelatest(cuda.functional)
+    return CUDA.functional()
 end
 
 function _to_device(x; use_gpu::Bool=false)
     if use_gpu && _cuda_functional()
-        cuda = _cuda_module()
-        return Base.invokelatest(cuda.cu, x)
+        return CUDA.cu(x)
     end
     return x
 end

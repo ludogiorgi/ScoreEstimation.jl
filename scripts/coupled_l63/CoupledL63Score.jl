@@ -268,25 +268,59 @@ function build_observed_diagnostics(high_dataset,
 end
 
 function train_score_model(train_samples::AbstractMatrix, noise_scale::Float64, cfg::ScoreConfig)
-    if cfg.use_gpu
+    use_gpu_eff = cfg.use_gpu
+    if use_gpu_eff
         ScoreEstimation._cuda_module()
-        ScoreEstimation._cuda_functional()
+        if !ScoreEstimation._cuda_functional()
+            log_message("fit_score", "GPU requested but CUDA is not functional; falling back to CPU for score training")
+            use_gpu_eff = false
+        end
     end
     normalized, μ, σ = standardize_samples(train_samples)
-    nn, losses, _, _, _, _, _ = ScoreEstimation.train(
-        normalized;
-        preprocessing=false,
-        σ=noise_scale,
-        neurons=cfg.neurons,
-        n_epochs=cfg.epochs,
-        batch_size=cfg.batch_size,
-        lr=cfg.learning_rate,
-        use_gpu=cfg.use_gpu,
-        verbose=true,
-        moment_weight_mean=cfg.mean_regularization,
-        moment_weight_stein=cfg.stein_regularization,
-        max_batches_per_epoch=cfg.max_batches_per_epoch,
-    )
+    nn = nothing
+    losses = nothing
+    try
+        nn, losses, _, _, _, _, _ = ScoreEstimation.train(
+            normalized;
+            preprocessing=false,
+            σ=noise_scale,
+            neurons=cfg.neurons,
+            n_epochs=cfg.epochs,
+            batch_size=cfg.batch_size,
+            lr=cfg.learning_rate,
+            use_gpu=use_gpu_eff,
+            verbose=true,
+            moment_weight_mean=cfg.mean_regularization,
+            moment_weight_stein=cfg.stein_regularization,
+            max_batches_per_epoch=cfg.max_batches_per_epoch,
+        )
+    catch err
+        if use_gpu_eff
+            log_message(
+                "fit_score",
+                @sprintf(
+                    "GPU score training failed (%s). Retrying on CPU.",
+                    sprint(showerror, err),
+                ),
+            )
+            nn, losses, _, _, _, _, _ = ScoreEstimation.train(
+                normalized;
+                preprocessing=false,
+                σ=noise_scale,
+                neurons=cfg.neurons,
+                n_epochs=cfg.epochs,
+                batch_size=cfg.batch_size,
+                lr=cfg.learning_rate,
+                use_gpu=false,
+                verbose=true,
+                moment_weight_mean=cfg.mean_regularization,
+                moment_weight_stein=cfg.stein_regularization,
+                max_batches_per_epoch=cfg.max_batches_per_epoch,
+            )
+        else
+            rethrow(err)
+        end
+    end
     log_message(
         "fit_score",
         @sprintf(

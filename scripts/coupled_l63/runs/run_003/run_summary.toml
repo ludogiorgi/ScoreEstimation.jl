@@ -1,7 +1,7 @@
 completed_stages = ["fit_score", "fit_phi_sigma", "estimate_residuals"]
 created_at = "2026-04-03T11:53:44"
-run_dir = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_003"
-config_path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml"
+run_dir = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_003"
+config_path = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml"
 run_id = 3
 run_name = "run_003"
 
@@ -10,7 +10,7 @@ sample_dt = 11.8
 cache_hit = true
 n_samples = 1000000
 hash = "7e94224286a44110b660fcc26eb69d6f8626af00"
-path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/datasets/low_res/7e94224286a44110b660fcc26eb69d6f8626af00/dataset.h5"
+path = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/data/datasets/low_res/7e94224286a44110b660fcc26eb69d6f8626af00/dataset.h5"
 
 [artifacts.phi_sigma]
 cache_hit = false
@@ -18,30 +18,30 @@ hash = "892201dd80d75759eaf00113c774284f39bfcc23"
 objective = 4.241146814260531
 clusters = 9200
 use_identity_sigma = false
-summary_path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/phi_sigma/892201dd80d75759eaf00113c774284f39bfcc23/phi_sigma_summary.toml"
-path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/phi_sigma/892201dd80d75759eaf00113c774284f39bfcc23/phi_sigma.h5"
+summary_path = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/data/phi_sigma/892201dd80d75759eaf00113c774284f39bfcc23/phi_sigma_summary.toml"
+path = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/data/phi_sigma/892201dd80d75759eaf00113c774284f39bfcc23/phi_sigma.h5"
 use_identity_phi = false
 
 [artifacts.score]
 cache_hit = false
 selected_noise_scale = 0.03
 hash = "3b28c092363f8ef08886fbe7f8fa33708fd2a9db"
-training_figure_png = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_003/score/score_training_diagnostics.png"
-training_figure_pdf = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_003/score/score_training_diagnostics.pdf"
+training_figure_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_003/score/score_training_diagnostics.png"
+training_figure_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_003/score/score_training_diagnostics.pdf"
 score_objective = 2.0191567457901183
-summary_path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/scores/3b28c092363f8ef08886fbe7f8fa33708fd2a9db/score_summary.toml"
-path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/scores/3b28c092363f8ef08886fbe7f8fa33708fd2a9db/score_model.bson"
+summary_path = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/data/scores/3b28c092363f8ef08886fbe7f8fa33708fd2a9db/score_summary.toml"
+path = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/data/scores/3b28c092363f8ef08886fbe7f8fa33708fd2a9db/score_model.bson"
 
 [artifacts.residuals]
 r2_rmse = 0.6539160734216386
 r1_rmse = 0.4966929894079988
-figure_png = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_003/residuals/residual_validation.png"
+figure_png = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_003/residuals/residual_validation.png"
 source_phi_sigma_hash = "892201dd80d75759eaf00113c774284f39bfcc23"
-figure_pdf = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_003/residuals/residual_validation.pdf"
+figure_pdf = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_003/residuals/residual_validation.pdf"
 
 [artifacts.high_resolution_dataset]
 sample_dt = 0.02
 cache_hit = true
 n_samples = 50000
 hash = "6722a24235b96952ae7fbed1832c6660cfea28c5"
-path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/datasets/high_res/6722a24235b96952ae7fbed1832c6660cfea28c5/dataset.h5"
+path = "/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/data/datasets/high_res/6722a24235b96952ae7fbed1832c6660cfea28c5/dataset.h5"

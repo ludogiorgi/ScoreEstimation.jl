@@ -1,9 +1,9 @@
 # Usage helpers for launching the wrapper from a terminal.
 [usage]
 # Run the wrapper in the foreground with the canonical project and config paths.
-normal_command = "julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml"
+normal_command = "julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml"
 # Run the wrapper detached so it keeps running after the SSH session closes.
-nohup_command = "nohup julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml > /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/nohup.out 2>&1 &"
+nohup_command = "nohup julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml > /home/ludogio/Documents/JuliaProjects/ScoreEstimation.jl/scripts/coupled_l63/nohup.out 2>&1 &"
 
 # Execution controls for the wrapper itself.
 [execution]
