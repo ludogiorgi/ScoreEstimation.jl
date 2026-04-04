@@ -1,0 +1,16 @@
+low_resolution_dataset_hash = "7e94224286a44110b660fcc26eb69d6f8626af00"
+
+[score]
+stein_regularization = 0.06
+rollout_device = "auto"
+max_batches_per_epoch = "nothing"
+batch_size = 1024
+max_stationary_samples = 1000000
+neurons = [128, 128]
+learning_rate = 0.0006
+mean_regularization = 0.001
+max_training_samples = 1000000
+noise_scales = [0.02]
+epochs = 200
+rng_seed = 20260402
+use_gpu = true

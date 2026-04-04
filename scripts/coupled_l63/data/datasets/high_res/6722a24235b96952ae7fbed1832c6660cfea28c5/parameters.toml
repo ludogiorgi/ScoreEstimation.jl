@@ -1,0 +1,23 @@
+[integration]
+t_total = 1200.0
+t_reference_transient = 50.0
+t_transient = 200.0
+dt = 0.0005
+t_reference = 200.0
+sample_stride = 40
+
+[system]
+label = "Final coupled L63 system"
+Omega = 0.35
+forcing_x1 = "y2"
+a2 = 0.05
+a1 = 0.18
+sigma_x2 = 0.12
+b2 = 0.05
+kappa = 0.3
+base_y3_ref = 0.0
+forcing_x2 = "y3"
+base_y2_ref = 0.0
+sigma_x1 = 0.1
+eps = 0.5
+b1 = 0.18

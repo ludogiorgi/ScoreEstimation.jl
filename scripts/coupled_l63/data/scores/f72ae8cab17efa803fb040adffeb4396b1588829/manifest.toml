@@ -1,0 +1,6 @@
+artifact_type = "score"
+created_at = "2026-04-02T15:00:17"
+artifact_hash = "f72ae8cab17efa803fb040adffeb4396b1588829"
+
+[dependencies]
+low_resolution_dataset_hash = "dff2a2780c62a0db78cc9f634935a920aa65aeba"

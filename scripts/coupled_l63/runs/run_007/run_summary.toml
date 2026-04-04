@@ -1,0 +1,47 @@
+completed_stages = ["fit_score", "fit_phi_sigma", "estimate_residuals"]
+created_at = "2026-04-03T13:48:51"
+run_dir = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_007"
+config_path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml"
+run_id = 7
+run_name = "run_007"
+
+[artifacts.low_resolution_dataset]
+sample_dt = 11.8
+cache_hit = true
+n_samples = 1000000
+hash = "7e94224286a44110b660fcc26eb69d6f8626af00"
+path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/datasets/low_res/7e94224286a44110b660fcc26eb69d6f8626af00/dataset.h5"
+
+[artifacts.phi_sigma]
+cache_hit = false
+hash = "734b5622eb488d43c71d762648cb94f01831d54e"
+objective = 7.2636663946158855
+clusters = 9230
+use_identity_sigma = false
+summary_path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/phi_sigma/734b5622eb488d43c71d762648cb94f01831d54e/phi_sigma_summary.toml"
+path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/phi_sigma/734b5622eb488d43c71d762648cb94f01831d54e/phi_sigma.h5"
+use_identity_phi = false
+
+[artifacts.score]
+cache_hit = false
+selected_noise_scale = 0.03
+hash = "14e90f0ac0c204f389950ba89bce789267da4eb4"
+training_figure_png = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_007/score/score_training_diagnostics.png"
+training_figure_pdf = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_007/score/score_training_diagnostics.pdf"
+score_objective = 1.5928925928163917
+summary_path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/scores/14e90f0ac0c204f389950ba89bce789267da4eb4/score_summary.toml"
+path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/scores/14e90f0ac0c204f389950ba89bce789267da4eb4/score_model.bson"
+
+[artifacts.residuals]
+r2_rmse = 0.6810073891292434
+r1_rmse = 0.5371515122157954
+figure_png = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_007/residuals/residual_validation.png"
+source_phi_sigma_hash = "734b5622eb488d43c71d762648cb94f01831d54e"
+figure_pdf = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/runs/run_007/residuals/residual_validation.pdf"
+
+[artifacts.high_resolution_dataset]
+sample_dt = 0.02
+cache_hit = true
+n_samples = 50000
+hash = "6722a24235b96952ae7fbed1832c6660cfea28c5"
+path = "/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/data/datasets/high_res/6722a24235b96952ae7fbed1832c6660cfea28c5/dataset.h5"

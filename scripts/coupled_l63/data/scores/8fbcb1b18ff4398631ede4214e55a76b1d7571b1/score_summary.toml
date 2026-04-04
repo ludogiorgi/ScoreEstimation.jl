@@ -1,0 +1,12 @@
+score_stein_error = 0.13427363774328557
+score_acf_rmse_x1 = 0.18108020321026577
+score_kl_joint = 0.34867423010359083
+candidate_noise_scales = [0.03]
+score_kl_x1 = 0.026255720956785376
+score_ccf_rmse = 0.2354849362963091
+score_l1_joint = 0.5772744137325061
+system_label = "Final coupled L63 system"
+score_acf_rmse_x2 = 0.24920948055792097
+score_kl_x2 = 0.012041182145284799
+noise_scale = 0.03
+score_objective = 1.5647930311185065

@@ -1,0 +1,12 @@
+high_resolution_dataset_hash = "6722a24235b96952ae7fbed1832c6660cfea28c5"
+score_hash = "5082f447bb9bee4b9ad4ef4fef09e0534278135a"
+
+[phi_sigma]
+max_correlated_samples = 240000
+partition_override = true
+generator_perturb_scale = -1.0
+minimum_probability = 8.0e-5
+use_identity_sigma = false
+sigma_regularization = 0.0008
+stationary_perturb_scale = -1.0
+use_identity_phi = false

@@ -1,0 +1,159 @@
+# Usage helpers for launching the wrapper from a terminal.
+[usage]
+# Run the wrapper in the foreground with the canonical project and config paths.
+normal_command = "julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml"
+# Run the wrapper detached so it keeps running after the SSH session closes.
+nohup_command = "nohup julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml > /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/nohup.out 2>&1 &"
+
+# Execution controls for the wrapper itself.
+[execution]
+# Ordered list of stages to rerun in this invocation.
+# Omitted stages are loaded from cache when a compatible artifact exists; if not,
+# they are computed once as dependencies and saved without being treated as
+# explicitly requested reruns.
+# stages = ["generate_data", "fit_score", "fit_phi_sigma", "estimate_residuals"]
+
+stages = ["fit_score", "fit_phi_sigma", "estimate_residuals"]
+
+# Parameters of the final 5D coupled slow-fast system.
+[system]
+# Human-readable label used in summaries and figure titles.
+label = "Final coupled L63 system"
+# Fast forcing component injected into the x1 slow equation.
+forcing_x1 = "y2"
+# Fast forcing component injected into the x2 slow equation.
+forcing_x2 = "y3"
+# Scale-separation parameter; smaller values mean faster unresolved variables.
+eps = 0.5
+# Linear damping coefficient in the x2 equation.
+kappa = 0.30
+# Linear coupling strength between x1 and x2.
+Omega = 0.35
+# Coupling coefficient from x1 into the fast y1 equation.
+a1 = 0.18
+# Coupling coefficient from x2 into the fast y1 equation.
+a2 = 0.05
+# Coupling coefficient from x1 into the fast y2 equation.
+b1 = 0.18
+# Coupling coefficient from x2 into the fast y2 equation.
+b2 = 0.05
+# Amplitude of the unresolved forcing entering the x1 equation.
+sigma_x1 = 0.10
+# Amplitude of the unresolved forcing entering the x2 equation.
+sigma_x2 = 0.12
+# Optional additive shift applied to the estimated y2 reference level.
+base_y2_ref = 0.0
+# Optional additive shift applied to the estimated y3 reference level.
+base_y3_ref = 0.0
+
+# Integration settings for the high-resolution correlated observation dataset.
+[integration.high_resolution]
+# Fine solver timestep used for integrating the full 5D system.
+dt = 5.0e-4
+# Total time used to estimate reference levels for the fast variables.
+t_reference = 200.0
+# Initial transient discarded during the reference-level integration.
+t_reference_transient = 50.0
+# Total integration time for the saved high-resolution observation dataset.
+t_total = 1200.0
+# Initial transient discarded before saving the high-resolution dataset.
+t_transient = 200.0
+# Save one observation every this many solver steps.
+sample_stride = 40
+
+# Construction of the low-resolution decorrelated dataset used for score training.
+[integration.low_resolution]
+# Target number of decorrelated samples to keep in the score-training dataset.
+training_target_uncorrelated = 1000000
+# Extra multiplier on the decorrelation stride when selecting seed states.
+training_seed_stride_multiplier = 1
+
+# Neural-network score-training configuration.
+[score]
+# Random seed for score training and score-stage stochastic choices.
+rng_seed = 20260402
+# DSM noise levels to sweep when selecting the score model.
+noise_scales = [0.1]
+# Number of training epochs for each DSM noise candidate.
+epochs = 400
+# Mini-batch size used during score training.
+batch_size = 2048
+# Hidden-layer widths for the score neural network.
+neurons = [64, 32, 16]
+# Optimizer learning rate for score training.
+learning_rate = 6.0e-4
+# Train the score network on GPU when CUDA is available.
+use_gpu = true
+# Device used for score-only and ROM Langevin rollouts: cpu, gpu, or auto.
+rollout_device = "auto"
+# Weight of the score mean-matching regularization term.
+mean_regularization = 1.0e-3
+# Weight of the Stein regularization term in score training.
+stein_regularization = 6.0e-2
+# Maximum number of low-resolution samples passed to score training.
+max_training_samples = 1000000
+# Maximum number of stationary observation samples used in rollout diagnostics.
+max_stationary_samples = 1000000
+
+# Phi/Sigma estimation controls.
+[phi_sigma]
+# Minimum cell probability used by the bisecting-KMeans tree partition for Q.
+minimum_probability = 8.0e-5
+# Allow the partitioner to override the nominal cell count when splitting.
+partition_override = true
+# Noise scale for perturbing correlated samples before estimating Q and Cdot; negative means use selected score sigma.
+generator_perturb_scale = -1.0
+# Noise scale for perturbing stationary samples before estimating V; negative means use selected score sigma.
+stationary_perturb_scale = -1.0
+# Eigenvalue floor used only when building Sigma from the symmetric part of Phi.
+sigma_regularization = 8.0e-4
+# If true, integrate the ROM with Phi = I instead of the estimated Phi.
+use_identity_phi = false
+# If true, integrate the ROM with Sigma = I instead of the estimated Sigma.
+use_identity_sigma = false
+# Maximum number of correlated high-resolution samples used in Phi/Sigma estimation.
+max_correlated_samples = 240000
+
+# ROM rollout and diagnostic settings.
+[rom]
+# Maximum lag used in ACF diagnostics.
+maxlag = 1800
+# Number of phase-space points used in downsampled trajectory visualizations.
+phase_points = 18000
+# Number of bins for 1D PDFs in score and ROM figures.
+pdf_bins = 140
+# Number of bins per axis for 2D joint PDFs.
+joint_pdf_bins = 100
+# Timestep used in the short score-only candidate rollouts.
+candidate_rollout_dt = 0.005
+# Number of integration steps in the short score-only candidate rollouts.
+candidate_rollout_steps = 70000
+# Burn-in length for the short score-only candidate rollouts.
+candidate_rollout_burnin = 16000
+# Number of ensembles in the short score-only candidate rollouts.
+candidate_rollout_ensembles = 128
+# Timestep used in the final ROM rollout.
+final_rollout_dt = 0.005
+# Number of integration steps in the final ROM rollout.
+final_rollout_steps = 200000
+# Burn-in length for the final ROM rollout.
+final_rollout_burnin = 26000
+# Number of ensembles in the final ROM rollout.
+final_rollout_ensembles = 256
+# Number of recent points shown in representative trajectory panels.
+x_excerpt_points = 3000
+# Resolution of the grid used to visualize the learned score field.
+score_grid_n = 64
+
+# Residual-recovery and residual-diagnostic settings.
+[residuals]
+# Radius of the local fitting window used to smooth x(t) and estimate xdot.
+derivative_window_radius = 7
+# Polynomial degree used in the local smoothing/derivative fit.
+derivative_degree = 3
+# Number of leading points shown in the residual comparison figure.
+excerpt_points = 1000
+# Number of bins for residual PDF comparisons.
+pdf_bins = 180
+# Maximum lag used in residual ACF comparisons.
+acf_lags = 1000

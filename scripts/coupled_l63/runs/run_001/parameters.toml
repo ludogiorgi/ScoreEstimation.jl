@@ -1,0 +1,81 @@
+[phi_sigma]
+max_correlated_samples = 240000
+partition_override = true
+generator_perturb_scale = -1.0
+minimum_probability = 8.0e-5
+use_identity_sigma = false
+sigma_regularization = 0.0008
+stationary_perturb_scale = -1.0
+use_identity_phi = false
+
+[score]
+stein_regularization = 0.06
+rollout_device = "auto"
+batch_size = 256
+max_stationary_samples = 180000
+neurons = [128, 128]
+learning_rate = 0.0006
+mean_regularization = 0.001
+max_training_samples = 180000
+noise_scales = [0.075]
+epochs = 100
+rng_seed = 20260402
+use_gpu = true
+
+[rom]
+joint_pdf_bins = 100
+candidate_rollout_dt = 0.005
+x_excerpt_points = 3000
+candidate_rollout_ensembles = 128
+candidate_rollout_burnin = 16000
+candidate_rollout_steps = 70000
+final_rollout_burnin = 26000
+score_grid_n = 64
+maxlag = 1800
+final_rollout_dt = 0.005
+phase_points = 18000
+final_rollout_ensembles = 256
+pdf_bins = 140
+final_rollout_steps = 200000
+
+[integration.high_resolution]
+t_total = 1200.0
+t_reference_transient = 50.0
+t_transient = 200.0
+dt = 0.0005
+t_reference = 200.0
+sample_stride = 40
+
+[integration.low_resolution]
+training_target_uncorrelated = 1000000
+training_seed_stride_multiplier = 1
+
+[usage]
+normal_command = "julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml"
+nohup_command = "nohup julia --threads auto --project=/home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/run_coupled_l63.jl --config /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/parameters.toml > /home/ludogio/Documents/JuliaProjects/GiulioProjects/ScoreEstimation.jl/scripts/coupled_l63/nohup.out 2>&1 &"
+
+[execution]
+stages = ["fit_score", "fit_phi_sigma", "estimate_residuals"]
+
+[residuals]
+acf_lags = 1000
+derivative_window_radius = 7
+pdf_bins = 180
+derivative_degree = 3
+excerpt_points = 1000
+
+[system]
+label = "Final coupled L63 system"
+Omega = 0.35
+forcing_x1 = "y2"
+a2 = 0.05
+a1 = 0.18
+sigma_x2 = 0.12
+b2 = 0.05
+kappa = 0.3
+base_y3_ref = 0.0
+forcing_x2 = "y3"
+base_y2_ref = 0.0
+sigma_x1 = 0.1
+eps = 0.5
+b1 = 0.18

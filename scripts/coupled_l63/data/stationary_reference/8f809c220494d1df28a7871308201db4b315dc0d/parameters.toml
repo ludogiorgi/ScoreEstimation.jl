@@ -1,0 +1,7 @@
+high_resolution_dataset_hash = "6722a24235b96952ae7fbed1832c6660cfea28c5"
+
+[rom]
+candidate_rollout_burnin = 16000
+candidate_rollout_dt = 0.005
+candidate_rollout_steps = 70000
+candidate_rollout_ensembles = 128

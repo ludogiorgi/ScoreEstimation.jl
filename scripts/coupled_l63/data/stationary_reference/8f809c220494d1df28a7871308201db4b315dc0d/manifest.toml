@@ -1,0 +1,6 @@
+artifact_type = "stationary_reference"
+created_at = "2026-04-02T17:30:23"
+artifact_hash = "8f809c220494d1df28a7871308201db4b315dc0d"
+
+[dependencies]
+high_resolution_dataset_hash = "6722a24235b96952ae7fbed1832c6660cfea28c5"

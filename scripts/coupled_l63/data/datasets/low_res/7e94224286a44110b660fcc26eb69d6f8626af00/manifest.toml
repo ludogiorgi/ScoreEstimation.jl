@@ -1,0 +1,6 @@
+artifact_type = "low_resolution_dataset"
+created_at = "2026-04-03T11:32:02"
+artifact_hash = "7e94224286a44110b660fcc26eb69d6f8626af00"
+
+[dependencies]
+high_resolution_dataset_hash = "6722a24235b96952ae7fbed1832c6660cfea28c5"

@@ -1,0 +1,10 @@
+kl_joint = 1.5861144570807642
+acf_rmse_x1 = 0.43010341838747745
+n_states = 9206
+noise_scale = 0.05
+objective = 11.259520344974657
+ccf_rmse = 0.4044357447537401
+acf_rmse_x2 = 0.37111497879781824
+system_label = "Final coupled L63 system"
+kl_x1 = 0.05288847309100924
+kl_x2 = 0.06671407554059462

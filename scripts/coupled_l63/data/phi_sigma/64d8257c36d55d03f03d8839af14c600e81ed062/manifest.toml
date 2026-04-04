@@ -1,0 +1,7 @@
+artifact_type = "phi_sigma"
+created_at = "2026-04-02T19:09:01"
+artifact_hash = "64d8257c36d55d03f03d8839af14c600e81ed062"
+
+[dependencies]
+high_resolution_dataset_hash = "6722a24235b96952ae7fbed1832c6660cfea28c5"
+score_hash = "c4d9f2bd23849f4c634532325ac8d0382a378ee7"
